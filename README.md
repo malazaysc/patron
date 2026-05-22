@@ -61,6 +61,23 @@ Current local commands:
 ```bash
 cargo run
 cargo test
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 The app starts on `http://127.0.0.1:3000`.
+
+## Git Hooks
+
+The repo uses `lefthook` for pre-commit enforcement.
+
+Once `lefthook` is installed locally, run:
+
+```bash
+lefthook install
+```
+
+The pre-commit hook runs:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`

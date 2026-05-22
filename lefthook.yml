@@ -1,0 +1,9 @@
+pre-commit:
+  parallel: false
+  commands:
+    rustfmt:
+      always_run: true
+      run: cargo fmt --check
+    clippy:
+      always_run: true
+      run: cargo clippy --all-targets --all-features -- -D warnings

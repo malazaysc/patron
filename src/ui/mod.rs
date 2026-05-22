@@ -2,35 +2,40 @@ use crate::db::StateStoreStatus;
 use crate::db::TaskRecord;
 use crate::domain::TASK_PIPELINE_STAGES;
 
-pub fn render_home(
-    runtime_root: &std::path::Path,
-    runtime_directories: &[std::path::PathBuf],
-    qa_directories: &[std::path::PathBuf],
-    state_store: &StateStoreStatus<'_>,
-    tasks: &[TaskRecord],
-    orchestrator_status: &str,
-    runner_status: &str,
-    qa_status: &str,
-) -> String {
+pub struct HomeView<'a> {
+    pub runtime_root: &'a std::path::Path,
+    pub runtime_directories: &'a [std::path::PathBuf],
+    pub qa_directories: &'a [std::path::PathBuf],
+    pub state_store: &'a StateStoreStatus<'a>,
+    pub tasks: &'a [TaskRecord],
+    pub orchestrator_status: &'a str,
+    pub runner_status: &'a str,
+    pub qa_status: &'a str,
+}
+
+pub fn render_home(view: HomeView<'_>) -> String {
     let stages = TASK_PIPELINE_STAGES
         .iter()
         .map(|stage| format!("<li>{stage}</li>"))
         .collect::<Vec<_>>()
         .join("");
-    let directories = runtime_directories
+    let directories = view
+        .runtime_directories
         .iter()
         .map(|path| format!("<li><code>{}</code></li>", path.display()))
         .collect::<Vec<_>>()
         .join("");
-    let qa_directories = qa_directories
+    let qa_directories = view
+        .qa_directories
         .iter()
         .map(|path| format!("<li><code>{}</code></li>", path.display()))
         .collect::<Vec<_>>()
         .join("");
-    let task_rows = if tasks.is_empty() {
+    let task_rows = if view.tasks.is_empty() {
         "<li>No draft tasks yet.</li>".to_string()
     } else {
-        tasks.iter()
+        view.tasks
+            .iter()
             .map(|task| {
                 format!(
                     "<li><strong>{}</strong> <code>{}</code> [{}]{}<br><small>{}</small><br><small>workspace: <code>{}</code></small>{}</li>",
@@ -89,17 +94,17 @@ pub fn render_home(
           </main>\
         </body>\
         </html>",
-        runtime_root.display(),
-        state_store.engine,
-        state_store.location,
-        state_store.schema_version,
-        state_store.initial_schema_bytes,
+        view.runtime_root.display(),
+        view.state_store.engine,
+        view.state_store.location,
+        view.state_store.schema_version,
+        view.state_store.initial_schema_bytes,
         directories,
         qa_directories,
         task_rows,
-        orchestrator_status,
-        runner_status,
-        qa_status,
+        view.orchestrator_status,
+        view.runner_status,
+        view.qa_status,
         stages,
     )
 }

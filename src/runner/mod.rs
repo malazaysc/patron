@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::{
     app::RuntimePaths,
-    db::{self, StageRunRecord},
+    db::{self, StageRunRecord, WorkingArtifactUpsert},
 };
 
 #[derive(Clone, Debug)]
@@ -96,13 +96,15 @@ where
             )?;
             db::upsert_working_artifact(
                 runtime,
-                &job.task_id,
-                &format!("run_log_{}", run.id),
-                "runner_log",
-                &format!(".patron/runs/{}/{}.log", job.task_id, run.id),
-                "text/plain",
-                false,
-                Some(run.id.as_str()),
+                WorkingArtifactUpsert {
+                    task_id: &job.task_id,
+                    role: &format!("run_log_{}", run.id),
+                    artifact_kind: "runner_log",
+                    relative_path: &format!(".patron/runs/{}/{}.log", job.task_id, run.id),
+                    media_type: "text/plain",
+                    required_for_stage: false,
+                    stage_run_id: Some(run.id.as_str()),
+                },
             )?;
 
             Ok(RunnerExecution { run, log_path })
@@ -115,13 +117,15 @@ where
             db::complete_stage_run(runtime, &run.id, "failed", Some(1), Some(&error))?;
             db::upsert_working_artifact(
                 runtime,
-                &job.task_id,
-                &format!("run_log_{}", run.id),
-                "runner_log",
-                &format!(".patron/runs/{}/{}.log", job.task_id, run.id),
-                "text/plain",
-                false,
-                Some(run.id.as_str()),
+                WorkingArtifactUpsert {
+                    task_id: &job.task_id,
+                    role: &format!("run_log_{}", run.id),
+                    artifact_kind: "runner_log",
+                    relative_path: &format!(".patron/runs/{}/{}.log", job.task_id, run.id),
+                    media_type: "text/plain",
+                    required_for_stage: false,
+                    stage_run_id: Some(run.id.as_str()),
+                },
             )?;
             Err(error)
         }

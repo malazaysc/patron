@@ -130,24 +130,27 @@ pub fn build_router(state: AppState) -> Router {
 async fn index(State(state): State<AppState>) -> Html<String> {
     let runtime = state.runtime();
     let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
-    let body = ui::render_home(
-        &runtime.relative_to_repo(&runtime.root),
-        &runtime
-            .required_directories()
-            .iter()
-            .map(|path| runtime.relative_to_repo(path))
-            .collect::<Vec<_>>(),
-        &runtime
-            .qa_evidence_directories()
-            .iter()
-            .map(|path| runtime.relative_to_repo(path))
-            .collect::<Vec<_>>(),
-        &db::state_store_status(runtime),
-        &task_snapshot,
-        &orchestrator::status_label(),
-        &runner::status_label(),
-        &qa::status_label(),
-    );
+    let runtime_directories = runtime
+        .required_directories()
+        .iter()
+        .map(|path| runtime.relative_to_repo(path))
+        .collect::<Vec<_>>();
+    let qa_directories = runtime
+        .qa_evidence_directories()
+        .iter()
+        .map(|path| runtime.relative_to_repo(path))
+        .collect::<Vec<_>>();
+    let state_store = db::state_store_status(runtime);
+    let body = ui::render_home(ui::HomeView {
+        runtime_root: &runtime.relative_to_repo(&runtime.root),
+        runtime_directories: &runtime_directories,
+        qa_directories: &qa_directories,
+        state_store: &state_store,
+        tasks: &task_snapshot,
+        orchestrator_status: orchestrator::status_label(),
+        runner_status: runner::status_label(),
+        qa_status: qa::status_label(),
+    });
 
     Html(body)
 }

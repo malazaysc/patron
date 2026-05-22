@@ -53,6 +53,16 @@ pub struct StageRunRecord {
     pub finished_at: Option<String>,
 }
 
+pub struct WorkingArtifactUpsert<'a> {
+    pub task_id: &'a str,
+    pub role: &'a str,
+    pub artifact_kind: &'a str,
+    pub relative_path: &'a str,
+    pub media_type: &'a str,
+    pub required_for_stage: bool,
+    pub stage_run_id: Option<&'a str>,
+}
+
 pub fn initialize(runtime: &RuntimePaths) -> Result<(), String> {
     let connection = open_connection(&runtime.state_db)?;
 
@@ -352,16 +362,10 @@ pub fn transition_task_state(
 
 pub fn upsert_working_artifact(
     runtime: &RuntimePaths,
-    task_id: &str,
-    role: &str,
-    artifact_kind: &str,
-    relative_path: &str,
-    media_type: &str,
-    required_for_stage: bool,
-    stage_run_id: Option<&str>,
+    artifact: WorkingArtifactUpsert<'_>,
 ) -> Result<(), String> {
     let connection = open_connection(&runtime.state_db)?;
-    let artifact_id = format!("{task_id}-{role}");
+    let artifact_id = format!("{}-{}", artifact.task_id, artifact.role);
     connection
         .execute(
             "INSERT INTO working_artifacts (
@@ -376,13 +380,13 @@ pub fn upsert_working_artifact(
                 required_for_stage = excluded.required_for_stage",
             params![
                 artifact_id,
-                task_id,
-                stage_run_id,
-                artifact_kind,
-                role,
-                relative_path,
-                media_type,
-                if required_for_stage { 1 } else { 0 },
+                artifact.task_id,
+                artifact.stage_run_id,
+                artifact.artifact_kind,
+                artifact.role,
+                artifact.relative_path,
+                artifact.media_type,
+                if artifact.required_for_stage { 1 } else { 0 },
                 timestamp_now()
             ],
         )

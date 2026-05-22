@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{
     app::RuntimePaths,
-    db::{self, TaskRecord},
+    db::{self, TaskRecord, WorkingArtifactUpsert},
     domain::task_lifecycle::{ActorKind, TaskState, TaskStateMachine, TransitionMetadata},
     runner::{self, RunnerCompletion, RunnerJob, RunnerOutcome},
 };
@@ -155,33 +155,39 @@ pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
         let task_root = format!(".patron/tasks/{}", task.id);
         db::upsert_working_artifact(
             runtime,
-            &task.id,
-            "task_md",
-            "task_document",
-            &format!("{task_root}/task.md"),
-            "text/markdown",
-            true,
-            Some(run.id.as_str()),
+            WorkingArtifactUpsert {
+                task_id: &task.id,
+                role: "task_md",
+                artifact_kind: "task_document",
+                relative_path: &format!("{task_root}/task.md"),
+                media_type: "text/markdown",
+                required_for_stage: true,
+                stage_run_id: Some(run.id.as_str()),
+            },
         )?;
         db::upsert_working_artifact(
             runtime,
-            &task.id,
-            "plan_md",
-            "plan_document",
-            &format!("{task_root}/plan.md"),
-            "text/markdown",
-            true,
-            Some(run.id.as_str()),
+            WorkingArtifactUpsert {
+                task_id: &task.id,
+                role: "plan_md",
+                artifact_kind: "plan_document",
+                relative_path: &format!("{task_root}/plan.md"),
+                media_type: "text/markdown",
+                required_for_stage: true,
+                stage_run_id: Some(run.id.as_str()),
+            },
         )?;
         db::upsert_working_artifact(
             runtime,
-            &task.id,
-            "qa_steps_md",
-            "qa_steps_document",
-            &format!("{task_root}/qa-steps.md"),
-            "text/markdown",
-            true,
-            Some(run.id.as_str()),
+            WorkingArtifactUpsert {
+                task_id: &task.id,
+                role: "qa_steps_md",
+                artifact_kind: "qa_steps_document",
+                relative_path: &format!("{task_root}/qa-steps.md"),
+                media_type: "text/markdown",
+                required_for_stage: true,
+                stage_run_id: Some(run.id.as_str()),
+            },
         )?;
 
         append_planning_log(
@@ -292,13 +298,15 @@ pub fn run_development(runtime: &RuntimePaths, task_id: &str) -> Result<(), Stri
 
         db::upsert_working_artifact(
             runtime,
-            &task.id,
-            "development_summary_md",
-            "development_summary",
-            &format!(".patron/tasks/{}/development-summary.md", task.id),
-            "text/markdown",
-            true,
-            Some(run.id.as_str()),
+            WorkingArtifactUpsert {
+                task_id: &task.id,
+                role: "development_summary_md",
+                artifact_kind: "development_summary",
+                relative_path: &format!(".patron/tasks/{}/development-summary.md", task.id),
+                media_type: "text/markdown",
+                required_for_stage: true,
+                stage_run_id: Some(run.id.as_str()),
+            },
         )?;
 
         append_planning_log(
@@ -411,13 +419,15 @@ pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
 
         db::upsert_working_artifact(
             runtime,
-            &task.id,
-            "review_md",
-            "review_document",
-            &format!(".patron/tasks/{}/review.md", task.id),
-            "text/markdown",
-            true,
-            Some(run.id.as_str()),
+            WorkingArtifactUpsert {
+                task_id: &task.id,
+                role: "review_md",
+                artifact_kind: "review_document",
+                relative_path: &format!(".patron/tasks/{}/review.md", task.id),
+                media_type: "text/markdown",
+                required_for_stage: true,
+                stage_run_id: Some(run.id.as_str()),
+            },
         )?;
 
         append_planning_log(
