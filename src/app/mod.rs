@@ -123,6 +123,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks", post(create_task))
         .route("/tasks/{task_id}/plan", post(run_planning))
         .route("/tasks/{task_id}/develop", post(run_development))
+        .route("/tasks/{task_id}/review", post(run_review))
         .with_state(state)
 }
 
@@ -194,6 +195,20 @@ async fn run_development(
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Development failed</h1><p>{error}</p>")),
+        )
+            .into_response(),
+    }
+}
+
+async fn run_review(
+    State(state): State<AppState>,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    match orchestrator::run_review(state.runtime(), &task_id) {
+        Ok(_) => Redirect::to("/").into_response(),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Review failed</h1><p>{error}</p>")),
         )
             .into_response(),
     }

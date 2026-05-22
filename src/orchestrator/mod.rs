@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub fn status_label() -> &'static str {
-    "draft intake, planning, and development scaffolding available"
+    "draft intake, planning, development, and review scaffolding available"
 }
 
 pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecord, String> {
@@ -341,6 +341,141 @@ pub fn run_development(runtime: &RuntimePaths, task_id: &str) -> Result<(), Stri
     Ok(())
 }
 
+pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
+    let task =
+        db::get_task(runtime, task_id)?.ok_or_else(|| format!("task {task_id} was not found"))?;
+    let current_state = parse_task_state(&task.state)?;
+    if current_state != TaskState::ReadyForReview {
+        return Err(format!(
+            "review can only run for ready_for_review tasks, found {}",
+            task.state
+        ));
+    }
+
+    let job = RunnerJob {
+        task_id: task.id.clone(),
+        stage: "review".into(),
+        summary: "Assess development output and produce review.md".into(),
+    };
+
+    runner::execute_job(runtime, job, |run, log_path| {
+        let review_metadata = transition_metadata(
+            ActorKind::Runner,
+            "review started",
+            Some("review_started"),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::ReadyForReview,
+            TaskState::Reviewing,
+            &review_metadata,
+        )
+        .map_err(|error| format!("invalid ready_for_review->reviewing transition: {error:?}"))?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::ReadyForReview,
+            TaskState::Reviewing,
+            &review_metadata,
+        )?;
+
+        let workspace_path = runtime.tasks_dir.join(&task.id);
+        let task_md = workspace_path.join("task.md");
+        let plan_md = workspace_path.join("plan.md");
+        let development_summary_md = workspace_path.join("development-summary.md");
+        validate_required_artifacts(&[&task_md, &plan_md, &development_summary_md])?;
+
+        let task_input = fs::read_to_string(&task_md)
+            .map_err(|error| format!("failed to read {}: {error}", task_md.display()))?;
+        let plan_input = fs::read_to_string(&plan_md)
+            .map_err(|error| format!("failed to read {}: {error}", plan_md.display()))?;
+        let development_input = fs::read_to_string(&development_summary_md).map_err(|error| {
+            format!(
+                "failed to read {}: {error}",
+                development_summary_md.display()
+            )
+        })?;
+
+        let review_result =
+            review_development_outputs(&task_input, &plan_input, &development_input);
+        let review_md = build_review_document(&task, &review_result);
+        let review_path = workspace_path.join("review.md");
+        fs::write(&review_path, review_md).map_err(|error| {
+            format!(
+                "failed to write review.md for {} at {}: {error}",
+                task.id,
+                review_path.display()
+            )
+        })?;
+        validate_required_artifacts(&[&review_path])?;
+
+        db::upsert_working_artifact(
+            runtime,
+            &task.id,
+            "review_md",
+            "review_document",
+            &format!(".patron/tasks/{}/review.md", task.id),
+            "text/markdown",
+            true,
+            Some(run.id.as_str()),
+        )?;
+
+        append_planning_log(
+            log_path,
+            &[
+                format!("consumed {}", task_md.display()),
+                format!("consumed {}", plan_md.display()),
+                format!("consumed {}", development_summary_md.display()),
+                format!("generated {}", review_path.display()),
+                format!("review outcome {}", review_result.outcome_label()),
+            ],
+        )?;
+
+        let target_state = if review_result.has_findings {
+            TaskState::FixRequired
+        } else {
+            TaskState::ReadyForQa
+        };
+        let finished_metadata = transition_metadata(
+            ActorKind::Runner,
+            if review_result.has_findings {
+                "review found actionable issues and routed to fix_required"
+            } else {
+                "review passed and task is ready for qa"
+            },
+            Some(if review_result.has_findings {
+                "review_failed"
+            } else {
+                "review_passed"
+            }),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::Reviewing,
+            target_state,
+            &finished_metadata,
+        )
+        .map_err(|error| format!("invalid reviewing transition: {error:?}"))?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::Reviewing,
+            target_state,
+            &finished_metadata,
+        )?;
+
+        Ok(RunnerOutcome {
+            completion: RunnerCompletion::Completed,
+            exit_code: if review_result.has_findings { 1 } else { 0 },
+            error_summary: review_result
+                .has_findings
+                .then(|| "review recorded findings".to_string()),
+        })
+    })?;
+
+    Ok(())
+}
+
 fn derive_title(goal: &str) -> String {
     let single_line = goal
         .lines()
@@ -361,6 +496,21 @@ struct PlanningPackage {
     qa_steps_md: String,
 }
 
+struct ReviewResult {
+    has_findings: bool,
+    findings: Vec<String>,
+}
+
+impl ReviewResult {
+    fn outcome_label(&self) -> &'static str {
+        if self.has_findings {
+            "fix_required"
+        } else {
+            "pass"
+        }
+    }
+}
+
 fn build_development_summary(
     task: &TaskRecord,
     task_md: &str,
@@ -376,6 +526,56 @@ fn build_development_summary(
         excerpt(plan_md),
         excerpt(qa_steps_md)
     )
+}
+
+fn build_review_document(task: &TaskRecord, result: &ReviewResult) -> String {
+    let findings = if result.findings.is_empty() {
+        "- No findings.".to_string()
+    } else {
+        result
+            .findings
+            .iter()
+            .map(|finding| format!("- {finding}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "# Review\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Outcome\n- Status: {}\n\n## Findings\n{}\n\n## Review Notes\n- Review runs after development and before QA.\n- Findings should route deterministically into `fix_required`.\n- Passing review should route the task to `ready_for_qa`.\n",
+        task.id,
+        task.title,
+        result.outcome_label(),
+        findings
+    )
+}
+
+fn review_development_outputs(
+    task_md: &str,
+    plan_md: &str,
+    development_summary_md: &str,
+) -> ReviewResult {
+    let mut findings = Vec::new();
+
+    if !development_summary_md.contains("Inputs Consumed") {
+        findings.push("development summary is missing the required inputs section".to_string());
+    }
+
+    if !development_summary_md.contains("Review Readiness") {
+        findings.push("development summary is missing the review readiness section".to_string());
+    }
+
+    if !task_md.contains("# Task") {
+        findings.push("task.md is missing the expected task header".to_string());
+    }
+
+    if !plan_md.contains("# Plan") {
+        findings.push("plan.md is missing the expected plan header".to_string());
+    }
+
+    ReviewResult {
+        has_findings: !findings.is_empty(),
+        findings,
+    }
 }
 
 fn excerpt(value: &str) -> String {
@@ -487,7 +687,10 @@ fn parse_task_state(state: &str) -> Result<TaskState, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskRecord, build_development_summary, build_planning_package, derive_title};
+    use super::{
+        TaskRecord, build_development_summary, build_planning_package, derive_title,
+        review_development_outputs,
+    };
 
     #[test]
     fn derive_title_uses_first_non_empty_line() {
@@ -542,5 +745,25 @@ mod tests {
         assert!(summary.contains("Inputs Consumed"));
         assert!(summary.contains("task.md"));
         assert!(summary.contains("review stage"));
+    }
+
+    #[test]
+    fn review_outputs_pass_when_required_sections_exist() {
+        let result = review_development_outputs(
+            "# Task\ncontent",
+            "# Plan\ncontent",
+            "## Inputs Consumed\nstuff\n## Review Readiness\nready",
+        );
+
+        assert!(!result.has_findings);
+        assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn review_outputs_findings_when_sections_are_missing() {
+        let result = review_development_outputs("# Task\ncontent", "# Plan\ncontent", "missing");
+
+        assert!(result.has_findings);
+        assert!(!result.findings.is_empty());
     }
 }
