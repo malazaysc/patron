@@ -3,6 +3,8 @@ use crate::domain::TASK_PIPELINE_STAGES;
 
 pub fn render_home(
     runtime_root: &std::path::Path,
+    runtime_directories: &[std::path::PathBuf],
+    qa_directories: &[std::path::PathBuf],
     state_store: &StateStoreStatus<'_>,
     orchestrator_status: &str,
     runner_status: &str,
@@ -11,6 +13,16 @@ pub fn render_home(
     let stages = TASK_PIPELINE_STAGES
         .iter()
         .map(|stage| format!("<li>{stage}</li>"))
+        .collect::<Vec<_>>()
+        .join("");
+    let directories = runtime_directories
+        .iter()
+        .map(|path| format!("<li><code>{}</code></li>", path.display()))
+        .collect::<Vec<_>>()
+        .join("");
+    let qa_directories = qa_directories
+        .iter()
+        .map(|path| format!("<li><code>{}</code></li>", path.display()))
         .collect::<Vec<_>>()
         .join("");
 
@@ -29,6 +41,10 @@ pub fn render_home(
             <h2>Runtime</h2>\
             <p>Working state root: <code>{}</code></p>\
             <p>State store: <code>{}</code> at <code>{}</code></p>\
+            <p>Bootstrap directories created on first run:</p>\
+            <ul>{}</ul>\
+            <p>QA evidence directories:</p>\
+            <ul>{}</ul>\
             <h2>Subsystems</h2>\
             <ul>\
               <li>Orchestrator: {}</li>\
@@ -44,6 +60,8 @@ pub fn render_home(
         runtime_root.display(),
         state_store.engine,
         state_store.location,
+        directories,
+        qa_directories,
         orchestrator_status,
         runner_status,
         qa_status,

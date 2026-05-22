@@ -24,6 +24,11 @@ impl AppState {
 pub struct RuntimePaths {
     pub root: PathBuf,
     pub state_db: PathBuf,
+    pub logs_dir: PathBuf,
+    pub qa_dir: PathBuf,
+    pub qa_logs_dir: PathBuf,
+    pub qa_screenshots_dir: PathBuf,
+    pub qa_traces_dir: PathBuf,
     pub runs_dir: PathBuf,
     pub tasks_dir: PathBuf,
 }
@@ -33,6 +38,11 @@ impl RuntimePaths {
         let root = std::env::current_dir()?.join(".patron");
 
         Ok(Self {
+            logs_dir: root.join("logs"),
+            qa_dir: root.join("qa"),
+            qa_logs_dir: root.join("qa").join("logs"),
+            qa_screenshots_dir: root.join("qa").join("screenshots"),
+            qa_traces_dir: root.join("qa").join("traces"),
             state_db: root.join("state.db"),
             runs_dir: root.join("runs"),
             tasks_dir: root.join("tasks"),
@@ -41,15 +51,52 @@ impl RuntimePaths {
     }
 
     pub fn ensure_layout(&self) -> io::Result<()> {
-        std::fs::create_dir_all(&self.root)?;
-        std::fs::create_dir_all(&self.runs_dir)?;
-        std::fs::create_dir_all(&self.tasks_dir)?;
+        for directory in self.required_directories() {
+            std::fs::create_dir_all(&directory).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not create runtime directory {}: {error}",
+                        directory.display()
+                    ),
+                )
+            })?;
+        }
 
         if !self.state_db.exists() {
-            std::fs::File::create(&self.state_db)?;
+            std::fs::File::create(&self.state_db).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not create runtime database file {}: {error}",
+                        self.state_db.display()
+                    ),
+                )
+            })?;
         }
 
         Ok(())
+    }
+
+    pub fn required_directories(&self) -> [PathBuf; 8] {
+        [
+            self.root.clone(),
+            self.tasks_dir.clone(),
+            self.runs_dir.clone(),
+            self.logs_dir.clone(),
+            self.qa_dir.clone(),
+            self.qa_logs_dir.clone(),
+            self.qa_screenshots_dir.clone(),
+            self.qa_traces_dir.clone(),
+        ]
+    }
+
+    pub fn qa_evidence_directories(&self) -> [PathBuf; 3] {
+        [
+            self.qa_logs_dir.clone(),
+            self.qa_screenshots_dir.clone(),
+            self.qa_traces_dir.clone(),
+        ]
     }
 
     pub fn relative_to_repo(&self, path: &Path) -> PathBuf {
@@ -74,6 +121,16 @@ async fn index(State(state): State<AppState>) -> Html<String> {
     let runtime = state.runtime();
     let body = ui::render_home(
         &runtime.relative_to_repo(&runtime.root),
+        &runtime
+            .required_directories()
+            .iter()
+            .map(|path| runtime.relative_to_repo(path))
+            .collect::<Vec<_>>(),
+        &runtime
+            .qa_evidence_directories()
+            .iter()
+            .map(|path| runtime.relative_to_repo(path))
+            .collect::<Vec<_>>(),
         &db::state_store_status(runtime),
         &orchestrator::status_label(),
         &runner::status_label(),

@@ -13,8 +13,12 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let runtime = app::RuntimePaths::discover()?;
-    runtime.ensure_layout()?;
+    let runtime = app::RuntimePaths::discover().map_err(|error| {
+        format!("failed to resolve the Patron runtime root under .patron/: {error}")
+    })?;
+    runtime
+        .ensure_layout()
+        .map_err(|error| format!("failed to initialize the Patron runtime layout: {error}"))?;
 
     let state = app::AppState::new(runtime);
     let router = app::build_router(state);

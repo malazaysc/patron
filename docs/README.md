@@ -7,6 +7,7 @@ The goal is a local-first, single-repository software delivery harness for Codex
 ## Document Map
 
 - [Architecture Overview](./architecture/v1-overview.md)
+- [Runtime Layout](./architecture/runtime-layout.md)
 - [PRD Template](./prd/README.md)
 - [V1 PRD](./prd/001-v1-local-autonomous-delivery-harness.md)
 - [GitHub Backlog Draft](./planning/github-backlog.md)
