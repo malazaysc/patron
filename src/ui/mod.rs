@@ -1,4 +1,5 @@
 use crate::db::StateStoreStatus;
+use crate::db::TaskRecord;
 use crate::domain::TASK_PIPELINE_STAGES;
 
 pub fn render_home(
@@ -6,6 +7,7 @@ pub fn render_home(
     runtime_directories: &[std::path::PathBuf],
     qa_directories: &[std::path::PathBuf],
     state_store: &StateStoreStatus<'_>,
+    tasks: &[TaskRecord],
     orchestrator_status: &str,
     runner_status: &str,
     qa_status: &str,
@@ -25,6 +27,23 @@ pub fn render_home(
         .map(|path| format!("<li><code>{}</code></li>", path.display()))
         .collect::<Vec<_>>()
         .join("");
+    let task_rows = if tasks.is_empty() {
+        "<li>No draft tasks yet.</li>".to_string()
+    } else {
+        tasks.iter()
+            .map(|task| {
+                format!(
+                    "<li><strong>{}</strong> <code>{}</code> [{}] <br><small>{}</small><br><small>workspace: <code>{}</code></small></li>",
+                    html_escape(&task.title),
+                    task.id,
+                    task.state,
+                    html_escape(&task.goal),
+                    task.workspace_path
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
 
     format!(
         "<!doctype html>\
@@ -45,6 +64,14 @@ pub fn render_home(
             <ul>{}</ul>\
             <p>QA evidence directories:</p>\
             <ul>{}</ul>\
+            <h2>Create draft task</h2>\
+            <form action=\"/tasks\" method=\"post\">\
+              <label for=\"goal\">Goal</label><br>\
+              <textarea id=\"goal\" name=\"goal\" rows=\"6\" cols=\"80\" placeholder=\"Describe the task goal\"></textarea><br>\
+              <button type=\"submit\">Create draft task</button>\
+            </form>\
+            <h2>Draft tasks</h2>\
+            <ul>{}</ul>\
             <h2>Subsystems</h2>\
             <ul>\
               <li>Orchestrator: {}</li>\
@@ -64,9 +91,17 @@ pub fn render_home(
         state_store.initial_schema_bytes,
         directories,
         qa_directories,
+        task_rows,
         orchestrator_status,
         runner_status,
         qa_status,
         stages,
     )
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

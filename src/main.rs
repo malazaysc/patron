@@ -19,6 +19,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     runtime
         .ensure_layout()
         .map_err(|error| format!("failed to initialize the Patron runtime layout: {error}"))?;
+    db::initialize(&runtime)
+        .map_err(|error| format!("failed to initialize the Patron SQLite state: {error}"))?;
 
     let state = app::AppState::new(runtime);
     let router = app::build_router(state);

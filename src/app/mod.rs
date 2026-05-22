@@ -1,7 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use axum::{Router, extract::State, response::Html, routing::get};
+use axum::{
+    Form, Router,
+    extract::State,
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
+};
 
 use crate::{db, orchestrator, qa, runner, ui};
 
@@ -114,11 +119,13 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/tasks", post(create_task))
         .with_state(state)
 }
 
 async fn index(State(state): State<AppState>) -> Html<String> {
     let runtime = state.runtime();
+    let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
     let body = ui::render_home(
         &runtime.relative_to_repo(&runtime.root),
         &runtime
@@ -132,6 +139,7 @@ async fn index(State(state): State<AppState>) -> Html<String> {
             .map(|path| runtime.relative_to_repo(path))
             .collect::<Vec<_>>(),
         &db::state_store_status(runtime),
+        &task_snapshot,
         &orchestrator::status_label(),
         &runner::status_label(),
         &qa::status_label(),
@@ -142,4 +150,20 @@ async fn index(State(state): State<AppState>) -> Html<String> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[derive(serde::Deserialize)]
+struct TaskCreateForm {
+    goal: String,
+}
+
+async fn create_task(State(state): State<AppState>, Form(form): Form<TaskCreateForm>) -> Response {
+    match orchestrator::create_draft_task(state.runtime(), &form.goal) {
+        Ok(_) => Redirect::to("/").into_response(),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Task creation failed</h1><p>{error}</p>")),
+        )
+            .into_response(),
+    }
 }

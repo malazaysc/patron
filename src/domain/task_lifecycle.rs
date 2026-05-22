@@ -106,6 +106,7 @@ impl HumanAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub struct TransitionMetadata {
     pub actor: ActorKind,
     pub actor_id: Option<String>,
@@ -117,6 +118,7 @@ pub struct TransitionMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum TransitionError {
     MissingOccurredAt,
     MissingReasonText,
@@ -126,8 +128,10 @@ pub enum TransitionError {
     InvalidTransition { from: TaskState, to: TaskState },
 }
 
+#[allow(dead_code)]
 pub struct TaskStateMachine;
 
+#[allow(dead_code)]
 impl TaskStateMachine {
     pub fn validate_transition(
         from: TaskState,
@@ -167,10 +171,12 @@ impl TaskStateMachine {
     }
 }
 
+#[allow(dead_code)]
 fn requires_run_id(from: TaskState, to: TaskState) -> bool {
     from.is_active_stage() || to.is_active_stage()
 }
 
+#[allow(dead_code)]
 fn is_allowed_transition(from: TaskState, to: TaskState) -> bool {
     if matches!(
         to,
