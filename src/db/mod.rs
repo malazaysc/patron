@@ -289,15 +289,16 @@ pub fn complete_stage_run(
     runtime: &RuntimePaths,
     run_id: &str,
     status: &str,
+    exit_code: Option<i64>,
     error_summary: Option<&str>,
 ) -> Result<(), String> {
     let connection = open_connection(&runtime.state_db)?;
     connection
         .execute(
             "UPDATE stage_runs
-             SET status = ?2, finished_at = ?3, error_summary = ?4
+             SET status = ?2, finished_at = ?3, exit_code = ?4, error_summary = ?5
              WHERE id = ?1",
-            params![run_id, status, timestamp_now(), error_summary],
+            params![run_id, status, timestamp_now(), exit_code, error_summary],
         )
         .map_err(|error| format!("failed to complete stage run {run_id}: {error}"))?;
     Ok(())

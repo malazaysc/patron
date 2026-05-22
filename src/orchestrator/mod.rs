@@ -5,6 +5,7 @@ use crate::{
     app::RuntimePaths,
     db::{self, TaskRecord},
     domain::task_lifecycle::{ActorKind, TaskState, TaskStateMachine, TransitionMetadata},
+    runner::{self, RunnerCompletion, RunnerJob, RunnerOutcome},
 };
 
 pub fn status_label() -> &'static str {
@@ -94,109 +95,132 @@ pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
         )?;
     }
 
-    let stage_run = db::create_stage_run(runtime, &task.id, "planning")?;
-    let planning_metadata = transition_metadata(
-        ActorKind::Orchestrator,
-        "planning started",
-        Some("planning_started"),
-        Some(stage_run.id.as_str()),
-    );
-    TaskStateMachine::validate_transition(
-        TaskState::ReadyForPlanning,
-        TaskState::Planning,
-        &planning_metadata,
-    )
-    .map_err(|error| format!("invalid ready_for_planning->planning transition: {error:?}"))?;
-    db::transition_task_state(
-        runtime,
-        &task.id,
-        TaskState::ReadyForPlanning,
-        TaskState::Planning,
-        &planning_metadata,
-    )?;
+    let job = RunnerJob {
+        task_id: task.id.clone(),
+        stage: "planning".into(),
+        summary: "Generate task.md, plan.md, and qa-steps.md".into(),
+    };
 
-    let workspace_path = runtime.tasks_dir.join(&task.id);
-    let planning_package = build_planning_package(&task);
-    let task_md = workspace_path.join("task.md");
-    let plan_md = workspace_path.join("plan.md");
-    let qa_steps_md = workspace_path.join("qa-steps.md");
-
-    fs::write(&task_md, planning_package.task_md).map_err(|error| {
-        format!(
-            "failed to write task.md for {} at {}: {error}",
-            task.id,
-            task_md.display()
+    runner::execute_job(runtime, job, |run, log_path| {
+        let planning_metadata = transition_metadata(
+            ActorKind::Runner,
+            "planning started",
+            Some("planning_started"),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::ReadyForPlanning,
+            TaskState::Planning,
+            &planning_metadata,
         )
-    })?;
-    fs::write(&plan_md, planning_package.plan_md).map_err(|error| {
-        format!(
-            "failed to write plan.md for {} at {}: {error}",
-            task.id,
-            plan_md.display()
+        .map_err(|error| format!("invalid ready_for_planning->planning transition: {error:?}"))?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::ReadyForPlanning,
+            TaskState::Planning,
+            &planning_metadata,
+        )?;
+
+        let workspace_path = runtime.tasks_dir.join(&task.id);
+        let planning_package = build_planning_package(&task);
+        let task_md = workspace_path.join("task.md");
+        let plan_md = workspace_path.join("plan.md");
+        let qa_steps_md = workspace_path.join("qa-steps.md");
+
+        fs::write(&task_md, planning_package.task_md).map_err(|error| {
+            format!(
+                "failed to write task.md for {} at {}: {error}",
+                task.id,
+                task_md.display()
+            )
+        })?;
+        fs::write(&plan_md, planning_package.plan_md).map_err(|error| {
+            format!(
+                "failed to write plan.md for {} at {}: {error}",
+                task.id,
+                plan_md.display()
+            )
+        })?;
+        fs::write(&qa_steps_md, planning_package.qa_steps_md).map_err(|error| {
+            format!(
+                "failed to write qa-steps.md for {} at {}: {error}",
+                task.id,
+                qa_steps_md.display()
+            )
+        })?;
+
+        validate_required_artifacts(&[&task_md, &plan_md, &qa_steps_md])?;
+
+        let task_root = format!(".patron/tasks/{}", task.id);
+        db::upsert_working_artifact(
+            runtime,
+            &task.id,
+            "task_md",
+            "task_document",
+            &format!("{task_root}/task.md"),
+            "text/markdown",
+            true,
+            Some(run.id.as_str()),
+        )?;
+        db::upsert_working_artifact(
+            runtime,
+            &task.id,
+            "plan_md",
+            "plan_document",
+            &format!("{task_root}/plan.md"),
+            "text/markdown",
+            true,
+            Some(run.id.as_str()),
+        )?;
+        db::upsert_working_artifact(
+            runtime,
+            &task.id,
+            "qa_steps_md",
+            "qa_steps_document",
+            &format!("{task_root}/qa-steps.md"),
+            "text/markdown",
+            true,
+            Some(run.id.as_str()),
+        )?;
+
+        append_planning_log(
+            log_path,
+            &[
+                format!("generated {}", task_md.display()),
+                format!("generated {}", plan_md.display()),
+                format!("generated {}", qa_steps_md.display()),
+            ],
+        )?;
+
+        let finished_metadata = transition_metadata(
+            ActorKind::Runner,
+            "planning completed and artifacts generated",
+            Some("planning_completed"),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::Planning,
+            TaskState::ReadyForDevelopment,
+            &finished_metadata,
         )
+        .map_err(|error| {
+            format!("invalid planning->ready_for_development transition: {error:?}")
+        })?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::Planning,
+            TaskState::ReadyForDevelopment,
+            &finished_metadata,
+        )?;
+
+        Ok(RunnerOutcome {
+            completion: RunnerCompletion::Completed,
+            exit_code: 0,
+            error_summary: None,
+        })
     })?;
-    fs::write(&qa_steps_md, planning_package.qa_steps_md).map_err(|error| {
-        format!(
-            "failed to write qa-steps.md for {} at {}: {error}",
-            task.id,
-            qa_steps_md.display()
-        )
-    })?;
-
-    validate_required_artifacts(&[&task_md, &plan_md, &qa_steps_md])?;
-
-    let task_root = format!(".patron/tasks/{}", task.id);
-    db::upsert_working_artifact(
-        runtime,
-        &task.id,
-        "task_md",
-        "task_document",
-        &format!("{task_root}/task.md"),
-        "text/markdown",
-        true,
-        Some(stage_run.id.as_str()),
-    )?;
-    db::upsert_working_artifact(
-        runtime,
-        &task.id,
-        "plan_md",
-        "plan_document",
-        &format!("{task_root}/plan.md"),
-        "text/markdown",
-        true,
-        Some(stage_run.id.as_str()),
-    )?;
-    db::upsert_working_artifact(
-        runtime,
-        &task.id,
-        "qa_steps_md",
-        "qa_steps_document",
-        &format!("{task_root}/qa-steps.md"),
-        "text/markdown",
-        true,
-        Some(stage_run.id.as_str()),
-    )?;
-
-    let finished_metadata = transition_metadata(
-        ActorKind::Orchestrator,
-        "planning completed and artifacts generated",
-        Some("planning_completed"),
-        Some(stage_run.id.as_str()),
-    );
-    TaskStateMachine::validate_transition(
-        TaskState::Planning,
-        TaskState::ReadyForDevelopment,
-        &finished_metadata,
-    )
-    .map_err(|error| format!("invalid planning->ready_for_development transition: {error:?}"))?;
-    db::transition_task_state(
-        runtime,
-        &task.id,
-        TaskState::Planning,
-        TaskState::ReadyForDevelopment,
-        &finished_metadata,
-    )?;
-    db::complete_stage_run(runtime, &stage_run.id, "completed", None)?;
 
     Ok(())
 }
@@ -252,6 +276,29 @@ fn validate_required_artifacts(paths: &[&Path]) -> Result<(), String> {
                 path.display()
             ));
         }
+    }
+    Ok(())
+}
+
+fn append_planning_log(log_path: &Path, lines: &[String]) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(log_path)
+        .map_err(|error| {
+            format!(
+                "failed to reopen planning log {}: {error}",
+                log_path.display()
+            )
+        })?;
+    for line in lines {
+        writeln!(file, "{line}").map_err(|error| {
+            format!(
+                "failed to append planning log {}: {error}",
+                log_path.display()
+            )
+        })?;
     }
     Ok(())
 }
