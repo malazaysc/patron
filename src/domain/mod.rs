@@ -1,3 +1,5 @@
+pub mod task_lifecycle;
+
 pub const TASK_PIPELINE_STAGES: [&str; 6] = [
     "planning",
     "development",
