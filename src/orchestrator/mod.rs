@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub fn status_label() -> &'static str {
-    "draft intake and planning scaffolding available"
+    "draft intake, planning, and development scaffolding available"
 }
 
 pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecord, String> {
@@ -225,6 +225,122 @@ pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
     Ok(())
 }
 
+pub fn run_development(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
+    let task =
+        db::get_task(runtime, task_id)?.ok_or_else(|| format!("task {task_id} was not found"))?;
+    let current_state = parse_task_state(&task.state)?;
+    if current_state != TaskState::ReadyForDevelopment {
+        return Err(format!(
+            "development can only run for ready_for_development tasks, found {}",
+            task.state
+        ));
+    }
+
+    let job = RunnerJob {
+        task_id: task.id.clone(),
+        stage: "development".into(),
+        summary: "Consume planning artifacts and generate a reviewable development summary".into(),
+    };
+
+    runner::execute_job(runtime, job, |run, log_path| {
+        let development_metadata = transition_metadata(
+            ActorKind::Runner,
+            "development started",
+            Some("development_started"),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::ReadyForDevelopment,
+            TaskState::Developing,
+            &development_metadata,
+        )
+        .map_err(|error| {
+            format!("invalid ready_for_development->developing transition: {error:?}")
+        })?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::ReadyForDevelopment,
+            TaskState::Developing,
+            &development_metadata,
+        )?;
+
+        let workspace_path = runtime.tasks_dir.join(&task.id);
+        let task_md = workspace_path.join("task.md");
+        let plan_md = workspace_path.join("plan.md");
+        let qa_steps_md = workspace_path.join("qa-steps.md");
+        validate_required_artifacts(&[&task_md, &plan_md, &qa_steps_md])?;
+
+        let task_input = fs::read_to_string(&task_md)
+            .map_err(|error| format!("failed to read {}: {error}", task_md.display()))?;
+        let plan_input = fs::read_to_string(&plan_md)
+            .map_err(|error| format!("failed to read {}: {error}", plan_md.display()))?;
+        let qa_input = fs::read_to_string(&qa_steps_md)
+            .map_err(|error| format!("failed to read {}: {error}", qa_steps_md.display()))?;
+
+        let development_summary =
+            build_development_summary(&task, &task_input, &plan_input, &qa_input);
+        let summary_path = workspace_path.join("development-summary.md");
+        fs::write(&summary_path, development_summary).map_err(|error| {
+            format!(
+                "failed to write development-summary.md for {} at {}: {error}",
+                task.id,
+                summary_path.display()
+            )
+        })?;
+        validate_required_artifacts(&[&summary_path])?;
+
+        db::upsert_working_artifact(
+            runtime,
+            &task.id,
+            "development_summary_md",
+            "development_summary",
+            &format!(".patron/tasks/{}/development-summary.md", task.id),
+            "text/markdown",
+            true,
+            Some(run.id.as_str()),
+        )?;
+
+        append_planning_log(
+            log_path,
+            &[
+                format!("consumed {}", task_md.display()),
+                format!("consumed {}", plan_md.display()),
+                format!("consumed {}", qa_steps_md.display()),
+                format!("generated {}", summary_path.display()),
+            ],
+        )?;
+
+        let finished_metadata = transition_metadata(
+            ActorKind::Runner,
+            "development summary generated and task ready for review",
+            Some("development_completed"),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::Developing,
+            TaskState::ReadyForReview,
+            &finished_metadata,
+        )
+        .map_err(|error| format!("invalid developing->ready_for_review transition: {error:?}"))?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::Developing,
+            TaskState::ReadyForReview,
+            &finished_metadata,
+        )?;
+
+        Ok(RunnerOutcome {
+            completion: RunnerCompletion::Completed,
+            exit_code: 0,
+            error_summary: None,
+        })
+    })?;
+
+    Ok(())
+}
+
 fn derive_title(goal: &str) -> String {
     let single_line = goal
         .lines()
@@ -243,6 +359,27 @@ struct PlanningPackage {
     task_md: String,
     plan_md: String,
     qa_steps_md: String,
+}
+
+fn build_development_summary(
+    task: &TaskRecord,
+    task_md: &str,
+    plan_md: &str,
+    qa_steps_md: &str,
+) -> String {
+    format!(
+        "# Development Summary\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Inputs Consumed\n- `task.md`\n- `plan.md`\n- `qa-steps.md`\n\n## Goal Snapshot\n{}\n\n## Development Contract\n- Development must run from the planning artifacts, not free-form memory.\n- The next implementation step should produce concrete code changes against the repository.\n- The resulting work must be reviewable before QA begins.\n\n## Review Readiness\n- Planning inputs were present at execution time.\n- A development summary has been generated for reviewers.\n- The task can now move into the review stage.\n\n## Planning Signals\n### task.md excerpt\n{}\n\n### plan.md excerpt\n{}\n\n### qa-steps.md excerpt\n{}\n",
+        task.id,
+        task.title,
+        task.goal,
+        excerpt(task_md),
+        excerpt(plan_md),
+        excerpt(qa_steps_md)
+    )
+}
+
+fn excerpt(value: &str) -> String {
+    value.lines().take(8).collect::<Vec<_>>().join("\n")
 }
 
 fn build_planning_package(task: &TaskRecord) -> PlanningPackage {
@@ -350,7 +487,7 @@ fn parse_task_state(state: &str) -> Result<TaskState, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskRecord, build_planning_package, derive_title};
+    use super::{TaskRecord, build_development_summary, build_planning_package, derive_title};
 
     #[test]
     fn derive_title_uses_first_non_empty_line() {
@@ -383,5 +520,27 @@ mod tests {
         assert!(package.plan_md.contains("# Plan"));
         assert!(package.qa_steps_md.contains("## Scenario 1"));
         assert!(package.qa_steps_md.contains("Expected result"));
+    }
+
+    #[test]
+    fn development_summary_mentions_planning_inputs() {
+        let summary = build_development_summary(
+            &TaskRecord {
+                id: "TASK-0002".into(),
+                title: "Runner-backed development".into(),
+                goal: "Generate a reviewable development output".into(),
+                state: "ready_for_development".into(),
+                current_stage: Some("development".into()),
+                workspace_path: ".patron/tasks/TASK-0002".into(),
+                handoff_path: ".patron/tasks/TASK-0002/orchestrator-handoff.md".into(),
+            },
+            "# Task\nexample",
+            "# Plan\nexample",
+            "# QA Steps\nexample",
+        );
+
+        assert!(summary.contains("Inputs Consumed"));
+        assert!(summary.contains("task.md"));
+        assert!(summary.contains("review stage"));
     }
 }

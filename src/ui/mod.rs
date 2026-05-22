@@ -43,7 +43,7 @@ pub fn render_home(
                         .unwrap_or_default(),
                     html_escape(&task.goal),
                     task.workspace_path,
-                    plan_button(task)
+                    task_action_buttons(task)
                 )
             })
             .collect::<Vec<_>>()
@@ -111,13 +111,16 @@ fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn plan_button(task: &TaskRecord) -> String {
-    if matches!(task.state.as_str(), "draft" | "ready_for_planning") {
-        return format!(
+fn task_action_buttons(task: &TaskRecord) -> String {
+    match task.state.as_str() {
+        "draft" | "ready_for_planning" => format!(
             "<form action=\"/tasks/{}/plan\" method=\"post\"><button type=\"submit\">Run planning</button></form>",
             task.id
-        );
+        ),
+        "ready_for_development" => format!(
+            "<form action=\"/tasks/{}/develop\" method=\"post\"><button type=\"submit\">Run development</button></form>",
+            task.id
+        ),
+        _ => String::new(),
     }
-
-    String::new()
 }
