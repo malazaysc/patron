@@ -33,12 +33,17 @@ pub fn render_home(
         tasks.iter()
             .map(|task| {
                 format!(
-                    "<li><strong>{}</strong> <code>{}</code> [{}] <br><small>{}</small><br><small>workspace: <code>{}</code></small></li>",
+                    "<li><strong>{}</strong> <code>{}</code> [{}]{}<br><small>{}</small><br><small>workspace: <code>{}</code></small>{}</li>",
                     html_escape(&task.title),
                     task.id,
                     task.state,
+                    task.current_stage
+                        .as_deref()
+                        .map(|stage| format!(" stage={stage}"))
+                        .unwrap_or_default(),
                     html_escape(&task.goal),
-                    task.workspace_path
+                    task.workspace_path,
+                    plan_button(task)
                 )
             })
             .collect::<Vec<_>>()
@@ -70,7 +75,7 @@ pub fn render_home(
               <textarea id=\"goal\" name=\"goal\" rows=\"6\" cols=\"80\" placeholder=\"Describe the task goal\"></textarea><br>\
               <button type=\"submit\">Create draft task</button>\
             </form>\
-            <h2>Draft tasks</h2>\
+            <h2>Tasks</h2>\
             <ul>{}</ul>\
             <h2>Subsystems</h2>\
             <ul>\
@@ -104,4 +109,15 @@ fn html_escape(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+fn plan_button(task: &TaskRecord) -> String {
+    if matches!(task.state.as_str(), "draft" | "ready_for_planning") {
+        return format!(
+            "<form action=\"/tasks/{}/plan\" method=\"post\"><button type=\"submit\">Run planning</button></form>",
+            task.id
+        );
+    }
+
+    String::new()
 }
