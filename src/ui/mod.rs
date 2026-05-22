@@ -40,7 +40,7 @@ pub fn render_home(
             <p>Local-first software delivery harness scaffold.</p>\
             <h2>Runtime</h2>\
             <p>Working state root: <code>{}</code></p>\
-            <p>State store: <code>{}</code> at <code>{}</code></p>\
+            <p>State store: <code>{}</code> at <code>{}</code> (schema v{}, migration bytes {})</p>\
             <p>Bootstrap directories created on first run:</p>\
             <ul>{}</ul>\
             <p>QA evidence directories:</p>\
@@ -60,6 +60,8 @@ pub fn render_home(
         runtime_root.display(),
         state_store.engine,
         state_store.location,
+        state_store.schema_version,
+        state_store.initial_schema_bytes,
         directories,
         qa_directories,
         orchestrator_status,
