@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub fn status_label() -> &'static str {
-    "draft intake, planning, development, and review scaffolding available"
+    "draft intake, planning, development, review, and fix-loop scaffolding available"
 }
 
 pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecord, String> {
@@ -486,6 +486,85 @@ pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn run_fix_loop(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
+    let task =
+        db::get_task(runtime, task_id)?.ok_or_else(|| format!("task {task_id} was not found"))?;
+    let current_state = parse_task_state(&task.state)?;
+    if current_state != TaskState::FixRequired {
+        return Err(format!(
+            "fix loop can only run for fix_required tasks, found {}",
+            task.state
+        ));
+    }
+
+    let workspace_path = runtime.tasks_dir.join(&task.id);
+    let review_path = workspace_path.join("review.md");
+    let qa_report_path = workspace_path.join("qa-report.md");
+    let fix_log_path = workspace_path.join("fix-log.md");
+
+    let failure_context = if review_path.exists() {
+        FixLoopSource {
+            source_stage: "review",
+            source_path: review_path.clone(),
+            contents: fs::read_to_string(&review_path)
+                .map_err(|error| format!("failed to read {}: {error}", review_path.display()))?,
+        }
+    } else if qa_report_path.exists() {
+        FixLoopSource {
+            source_stage: "qa",
+            source_path: qa_report_path.clone(),
+            contents: fs::read_to_string(&qa_report_path)
+                .map_err(|error| format!("failed to read {}: {error}", qa_report_path.display()))?,
+        }
+    } else {
+        return Err(
+            "fix loop requires either review.md or qa-report.md as failure context".to_string(),
+        );
+    };
+
+    let entry = build_fix_log_entry(&task, &failure_context);
+    append_fix_log(&fix_log_path, &entry)?;
+    db::upsert_working_artifact(
+        runtime,
+        WorkingArtifactUpsert {
+            task_id: &task.id,
+            role: "fix_log_md",
+            artifact_kind: "fix_log",
+            relative_path: &format!(".patron/tasks/{}/fix-log.md", task.id),
+            media_type: "text/markdown",
+            required_for_stage: true,
+            stage_run_id: None,
+        },
+    )?;
+
+    let fix_metadata = transition_metadata(
+        ActorKind::Runner,
+        &format!(
+            "fix loop prepared from {} findings and task returned to development",
+            failure_context.source_stage
+        ),
+        Some("fix_loop_prepared"),
+        None,
+    );
+    TaskStateMachine::validate_transition(
+        TaskState::FixRequired,
+        TaskState::ReadyForDevelopment,
+        &fix_metadata,
+    )
+    .map_err(|error| {
+        format!("invalid fix_required->ready_for_development transition: {error:?}")
+    })?;
+    db::transition_task_state(
+        runtime,
+        &task.id,
+        TaskState::FixRequired,
+        TaskState::ReadyForDevelopment,
+        &fix_metadata,
+    )?;
+
+    Ok(())
+}
+
 fn derive_title(goal: &str) -> String {
     let single_line = goal
         .lines()
@@ -509,6 +588,12 @@ struct PlanningPackage {
 struct ReviewResult {
     has_findings: bool,
     findings: Vec<String>,
+}
+
+struct FixLoopSource {
+    source_stage: &'static str,
+    source_path: std::path::PathBuf,
+    contents: String,
 }
 
 impl ReviewResult {
@@ -556,6 +641,16 @@ fn build_review_document(task: &TaskRecord, result: &ReviewResult) -> String {
         task.title,
         result.outcome_label(),
         findings
+    )
+}
+
+fn build_fix_log_entry(task: &TaskRecord, source: &FixLoopSource) -> String {
+    format!(
+        "## Fix Loop Entry\n\n- Task: `{}`\n- Source stage: `{}`\n- Source artifact: `{}`\n- Next state: `ready_for_development`\n\n### Failure Context Excerpt\n{}\n\n### Fix Guidance\n- Re-enter development using the latest planning artifacts.\n- Address the failure context before re-running review or QA.\n- Preserve the previous artifacts for traceability.\n\n",
+        task.id,
+        source.source_stage,
+        source.source_path.display(),
+        excerpt(&source.contents)
     )
 }
 
@@ -650,6 +745,26 @@ fn append_planning_log(log_path: &Path, lines: &[String]) -> Result<(), String> 
     Ok(())
 }
 
+fn append_fix_log(log_path: &Path, entry: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    if !log_path.exists() {
+        fs::write(log_path, "# Fix Log\n\n").map_err(|error| {
+            format!(
+                "failed to initialize fix log {}: {error}",
+                log_path.display()
+            )
+        })?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(log_path)
+        .map_err(|error| format!("failed to reopen fix log {}: {error}", log_path.display()))?;
+    file.write_all(entry.as_bytes())
+        .map_err(|error| format!("failed to append fix log {}: {error}", log_path.display()))
+}
+
 fn transition_metadata(
     actor: ActorKind,
     reason_text: &str,
@@ -698,8 +813,8 @@ fn parse_task_state(state: &str) -> Result<TaskState, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        TaskRecord, build_development_summary, build_planning_package, derive_title,
-        review_development_outputs,
+        FixLoopSource, TaskRecord, build_development_summary, build_fix_log_entry,
+        build_planning_package, derive_title, review_development_outputs,
     };
 
     #[test]
@@ -775,5 +890,29 @@ mod tests {
 
         assert!(result.has_findings);
         assert!(!result.findings.is_empty());
+    }
+
+    #[test]
+    fn fix_log_entry_preserves_failure_context() {
+        let entry = build_fix_log_entry(
+            &TaskRecord {
+                id: "TASK-0099".into(),
+                title: "Broken review".into(),
+                goal: "Exercise the fix loop".into(),
+                state: "fix_required".into(),
+                current_stage: Some("review".into()),
+                workspace_path: ".patron/tasks/TASK-0099".into(),
+                handoff_path: ".patron/tasks/TASK-0099/orchestrator-handoff.md".into(),
+            },
+            &FixLoopSource {
+                source_stage: "review",
+                source_path: ".patron/tasks/TASK-0099/review.md".into(),
+                contents: "# Review\n\n## Findings\n- Missing section".into(),
+            },
+        );
+
+        assert!(entry.contains("Source stage: `review`"));
+        assert!(entry.contains("Missing section"));
+        assert!(entry.contains("ready_for_development"));
     }
 }

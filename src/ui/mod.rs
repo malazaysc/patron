@@ -130,6 +130,10 @@ fn task_action_buttons(task: &TaskRecord) -> String {
             "<form action=\"/tasks/{}/review\" method=\"post\"><button type=\"submit\">Run review</button></form>",
             task.id
         ),
+        "fix_required" => format!(
+            "<form action=\"/tasks/{}/fix\" method=\"post\"><button type=\"submit\">Run fix loop</button></form>",
+            task.id
+        ),
         _ => String::new(),
     }
 }
