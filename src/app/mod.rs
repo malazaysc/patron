@@ -128,6 +128,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{task_id}/develop", post(run_development))
         .route("/tasks/{task_id}/review", post(run_review))
         .route("/tasks/{task_id}/qa", post(run_qa))
+        .route("/tasks/{task_id}/prepare-pr", post(run_pr_preparation))
         .route("/tasks/{task_id}/fix", post(run_fix_loop))
         .with_state(state)
 }
@@ -179,19 +180,23 @@ async fn task_detail(
     let transitions = db::list_state_transitions(runtime, &task_id).unwrap_or_default();
     let stage_runs = db::list_stage_runs(runtime, &task_id).unwrap_or_default();
     let artifacts = db::list_working_artifacts(runtime, &task_id).unwrap_or_default();
+    let human_actions = db::list_human_actions(runtime, &task_id).unwrap_or_default();
 
     let qa_report = read_artifact_text(runtime, &task_id, "qa_report_md");
     let qa_log = read_artifact_text(runtime, &task_id, "qa_log");
     let review_report = read_artifact_text(runtime, &task_id, "review_md");
+    let pr_summary = read_artifact_text(runtime, &task_id, "pr_summary_md");
 
     Html(ui::render_task_detail(ui::TaskDetailView {
         task: &task,
         transitions: &transitions,
         stage_runs: &stage_runs,
         artifacts: &artifacts,
+        human_actions: &human_actions,
         qa_report: qa_report.as_deref(),
         qa_log: qa_log.as_deref(),
         review_report: review_report.as_deref(),
+        pr_summary: pr_summary.as_deref(),
     }))
     .into_response()
 }
@@ -313,6 +318,20 @@ async fn run_qa(State(state): State<AppState>, AxumPath(task_id): AxumPath<Strin
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>QA failed</h1><p>{error}</p>")),
+        )
+            .into_response(),
+    }
+}
+
+async fn run_pr_preparation(
+    State(state): State<AppState>,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    match orchestrator::run_pr_preparation(state.runtime(), &task_id) {
+        Ok(_) => Redirect::to("/").into_response(),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>PR preparation failed</h1><p>{error}</p>")),
         )
             .into_response(),
     }

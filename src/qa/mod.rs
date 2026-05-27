@@ -766,6 +766,8 @@ mod tests {
                 title: "QA report".into(),
                 goal: "Verify qa report formatting".into(),
                 state: "ready_for_qa".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
                 current_stage: Some("qa".into()),
                 workspace_path: ".patron/tasks/TASK-0010".into(),
                 handoff_path: ".patron/tasks/TASK-0010/orchestrator-handoff.md".into(),

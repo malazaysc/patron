@@ -658,6 +658,12 @@ Acceptance criteria:
 - the selected policy is documented
 - task lifecycle and UI requirements reflect the decision
 
+Decision:
+
+- do not require plan approval in V1
+- planning starts immediately after task intake by default
+- future repo-specific policies may add plan approval later without changing the default v1 workflow
+
 ## Suggested First Wave
 
 If you want the smallest sensible implementation sequence, open these first:

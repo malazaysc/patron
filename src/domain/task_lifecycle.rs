@@ -193,13 +193,17 @@ fn is_allowed_transition(from: TaskState, to: TaskState) -> bool {
         (from, to),
         (TaskState::Draft, TaskState::ReadyForPlanning)
             | (TaskState::ReadyForPlanning, TaskState::Planning)
+            | (TaskState::Planning, TaskState::ReadyForPlanning)
             | (TaskState::Planning, TaskState::ReadyForDevelopment)
             | (TaskState::ReadyForDevelopment, TaskState::Developing)
+            | (TaskState::Developing, TaskState::ReadyForDevelopment)
             | (TaskState::Developing, TaskState::ReadyForReview)
             | (TaskState::ReadyForReview, TaskState::Reviewing)
+            | (TaskState::Reviewing, TaskState::ReadyForReview)
             | (TaskState::Reviewing, TaskState::ReadyForQa)
             | (TaskState::Reviewing, TaskState::FixRequired)
             | (TaskState::ReadyForQa, TaskState::QaRunning)
+            | (TaskState::QaRunning, TaskState::ReadyForQa)
             | (TaskState::QaRunning, TaskState::ReadyForPr)
             | (TaskState::QaRunning, TaskState::FixRequired)
             | (TaskState::FixRequired, TaskState::ReadyForDevelopment)
@@ -338,5 +342,21 @@ mod tests {
         );
 
         assert_eq!(done_result, Ok(()));
+    }
+
+    #[test]
+    fn allows_recovery_to_ready_state_from_active_stage() {
+        let mut metadata = metadata();
+        metadata.run_id = Some("TASK-0001-development-099".into());
+        metadata.reason_code = Some("recovered_retry_ready".into());
+        metadata.reason_text = "startup recovery reset the interrupted stage".into();
+
+        let result = TaskStateMachine::validate_transition(
+            TaskState::Developing,
+            TaskState::ReadyForDevelopment,
+            &metadata,
+        );
+
+        assert_eq!(result, Ok(()));
     }
 }

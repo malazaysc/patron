@@ -3,13 +3,15 @@ use std::path::Path;
 
 use crate::{
     app::RuntimePaths,
-    db::{self, TaskRecord, WorkingArtifactUpsert},
-    domain::task_lifecycle::{ActorKind, TaskState, TaskStateMachine, TransitionMetadata},
+    db::{self, HumanActionCreate, TaskRecord, WorkingArtifactUpsert},
+    domain::task_lifecycle::{
+        ActorKind, HumanAction, TaskState, TaskStateMachine, TransitionMetadata,
+    },
     runner::{self, RunnerCompletion, RunnerJob, RunnerOutcome},
 };
 
 pub fn status_label() -> &'static str {
-    "draft intake, planning, development, review, and fix-loop scaffolding available; qa delegated to the qa subsystem"
+    "draft intake, planning, development, review, fix-loop scaffolding, and PR preparation available; qa delegated to the qa subsystem"
 }
 
 pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecord, String> {
@@ -48,6 +50,8 @@ pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecor
         title,
         goal: trimmed_goal.to_string(),
         state: TaskState::Draft.as_str().to_string(),
+        blocked_reason_code: None,
+        blocked_reason_text: None,
         current_stage: None,
         workspace_path: workspace_relative.clone(),
         handoff_path: format!("{workspace_relative}/orchestrator-handoff.md"),
@@ -565,6 +569,133 @@ pub fn run_fix_loop(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
     Ok(())
 }
 
+pub fn run_pr_preparation(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
+    let task =
+        db::get_task(runtime, task_id)?.ok_or_else(|| format!("task {task_id} was not found"))?;
+    let current_state = parse_task_state(&task.state)?;
+    if current_state != TaskState::ReadyForPr {
+        return Err(format!(
+            "pr preparation can only run for ready_for_pr tasks, found {}",
+            task.state
+        ));
+    }
+
+    let job = RunnerJob {
+        task_id: task.id.clone(),
+        stage: "pr_preparation".into(),
+        summary: "Generate pr-summary.md and hand off to human review".into(),
+    };
+
+    runner::execute_job(runtime, job, |run, log_path| {
+        let workspace_path = runtime.tasks_dir.join(&task.id);
+        let task_md = workspace_path.join("task.md");
+        let plan_md = workspace_path.join("plan.md");
+        let review_md = workspace_path.join("review.md");
+        let qa_report_md = workspace_path.join("qa-report.md");
+        validate_required_artifacts(&[&task_md, &plan_md, &review_md, &qa_report_md])?;
+
+        let ready_metadata = transition_metadata(
+            ActorKind::Runner,
+            "pr preparation started",
+            Some("pr_preparation_started"),
+            Some(run.id.as_str()),
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::ReadyForPr,
+            TaskState::PrPrepared,
+            &ready_metadata,
+        )
+        .map_err(|error| format!("invalid ready_for_pr->pr_prepared transition: {error:?}"))?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::ReadyForPr,
+            TaskState::PrPrepared,
+            &ready_metadata,
+        )?;
+
+        let review_input = fs::read_to_string(&review_md)
+            .map_err(|error| format!("failed to read {}: {error}", review_md.display()))?;
+        let qa_report_input = fs::read_to_string(&qa_report_md)
+            .map_err(|error| format!("failed to read {}: {error}", qa_report_md.display()))?;
+        let pr_summary = build_pr_summary(&task, &review_input, &qa_report_input);
+        let pr_summary_path = workspace_path.join("pr-summary.md");
+        fs::write(&pr_summary_path, pr_summary).map_err(|error| {
+            format!(
+                "failed to write pr-summary.md for {} at {}: {error}",
+                task.id,
+                pr_summary_path.display()
+            )
+        })?;
+        validate_required_artifacts(&[&pr_summary_path])?;
+
+        db::upsert_working_artifact(
+            runtime,
+            WorkingArtifactUpsert {
+                task_id: &task.id,
+                role: "pr_summary_md",
+                artifact_kind: "pr_summary",
+                relative_path: &format!(".patron/tasks/{}/pr-summary.md", task.id),
+                media_type: "text/markdown",
+                required_for_stage: true,
+                stage_run_id: Some(run.id.as_str()),
+            },
+        )?;
+
+        db::insert_human_action(
+            runtime,
+            HumanActionCreate {
+                id: &format!("{}-review-pr", task.id),
+                task_id: &task.id,
+                action_type: HumanAction::ReviewPr.as_str(),
+                requested_by: "patron",
+                instructions: "Review the prepared PR summary, validate the linked QA evidence, and open or approve the final PR.",
+            },
+        )?;
+
+        append_planning_log(
+            log_path,
+            &[
+                format!("consumed {}", task_md.display()),
+                format!("consumed {}", plan_md.display()),
+                format!("consumed {}", review_md.display()),
+                format!("consumed {}", qa_report_md.display()),
+                format!("generated {}", pr_summary_path.display()),
+                "requested human action review_pr".to_string(),
+            ],
+        )?;
+
+        let awaiting_metadata = transition_metadata_with_action(
+            ActorKind::Runner,
+            "pr summary generated and task handed off for human review",
+            Some("pr_prepared"),
+            Some(run.id.as_str()),
+            HumanAction::ReviewPr,
+        );
+        TaskStateMachine::validate_transition(
+            TaskState::PrPrepared,
+            TaskState::AwaitingHuman,
+            &awaiting_metadata,
+        )
+        .map_err(|error| format!("invalid pr_prepared->awaiting_human transition: {error:?}"))?;
+        db::transition_task_state(
+            runtime,
+            &task.id,
+            TaskState::PrPrepared,
+            TaskState::AwaitingHuman,
+            &awaiting_metadata,
+        )?;
+
+        Ok(RunnerOutcome {
+            completion: RunnerCompletion::Completed,
+            exit_code: 0,
+            error_summary: None,
+        })
+    })?;
+
+    Ok(())
+}
+
 fn derive_title(goal: &str) -> String {
     let single_line = goal
         .lines()
@@ -651,6 +782,17 @@ fn build_fix_log_entry(task: &TaskRecord, source: &FixLoopSource) -> String {
         source.source_stage,
         source.source_path.display(),
         excerpt(&source.contents)
+    )
+}
+
+fn build_pr_summary(task: &TaskRecord, review_md: &str, qa_report_md: &str) -> String {
+    format!(
+        "# PR Summary\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Goal\n{}\n\n## Review Outcome\n{}\n\n## QA Outcome\n{}\n\n## Ready For Human Review\n- Confirm the branch changes match the task goal.\n- Validate the linked QA evidence before creating or approving the PR.\n- Note any residual risk or follow-up work in the PR description.\n",
+        task.id,
+        task.title,
+        task.goal,
+        excerpt(review_md),
+        excerpt(qa_report_md)
     )
 }
 
@@ -787,6 +929,29 @@ fn transition_metadata(
     }
 }
 
+fn transition_metadata_with_action(
+    actor: ActorKind,
+    reason_text: &str,
+    reason_code: Option<&str>,
+    run_id: Option<&str>,
+    required_human_action: HumanAction,
+) -> TransitionMetadata {
+    TransitionMetadata {
+        actor,
+        actor_id: None,
+        occurred_at: format!(
+            "unix:{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs())
+        ),
+        reason_code: reason_code.map(ToOwned::to_owned),
+        reason_text: reason_text.to_string(),
+        run_id: run_id.map(ToOwned::to_owned),
+        required_human_action: Some(required_human_action),
+    }
+}
+
 fn parse_task_state(state: &str) -> Result<TaskState, String> {
     match state {
         "draft" => Ok(TaskState::Draft),
@@ -839,6 +1004,8 @@ mod tests {
             title: "Build draft intake".into(),
             goal: "Build the draft task intake flow".into(),
             state: "draft".into(),
+            blocked_reason_code: None,
+            blocked_reason_text: None,
             current_stage: None,
             workspace_path: ".patron/tasks/TASK-0001".into(),
             handoff_path: ".patron/tasks/TASK-0001/orchestrator-handoff.md".into(),
@@ -858,6 +1025,8 @@ mod tests {
                 title: "Runner-backed development".into(),
                 goal: "Generate a reviewable development output".into(),
                 state: "ready_for_development".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
                 current_stage: Some("development".into()),
                 workspace_path: ".patron/tasks/TASK-0002".into(),
                 handoff_path: ".patron/tasks/TASK-0002/orchestrator-handoff.md".into(),
@@ -900,6 +1069,8 @@ mod tests {
                 title: "Broken review".into(),
                 goal: "Exercise the fix loop".into(),
                 state: "fix_required".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
                 current_stage: Some("review".into()),
                 workspace_path: ".patron/tasks/TASK-0099".into(),
                 handoff_path: ".patron/tasks/TASK-0099/orchestrator-handoff.md".into(),

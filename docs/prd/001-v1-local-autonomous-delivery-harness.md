@@ -160,9 +160,8 @@ The system should feel like a visual autopilot for software delivery, not an opa
 - team permissions
 - cross-repo dependencies
 
-## Open Questions
+## Remaining Questions
 
-- Should plan approval be required by default or optional?
 - Should review be implemented as a Codex stage before QA in all cases?
 - Should PR creation itself be automated in V1 or only the PR summary?
 

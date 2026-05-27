@@ -1,3 +1,4 @@
+use crate::db::HumanActionRecord;
 use crate::db::StageRunRecord;
 use crate::db::StateStoreStatus;
 use crate::db::StateTransitionRecord;
@@ -21,9 +22,11 @@ pub struct TaskDetailView<'a> {
     pub transitions: &'a [StateTransitionRecord],
     pub stage_runs: &'a [StageRunRecord],
     pub artifacts: &'a [WorkingArtifactRecord],
+    pub human_actions: &'a [HumanActionRecord],
     pub qa_report: Option<&'a str>,
     pub qa_log: Option<&'a str>,
     pub review_report: Option<&'a str>,
+    pub pr_summary: Option<&'a str>,
 }
 
 pub fn render_home(view: HomeView<'_>) -> String {
@@ -44,31 +47,7 @@ pub fn render_home(view: HomeView<'_>) -> String {
         .map(|path| format!("<li><code>{}</code></li>", path.display()))
         .collect::<Vec<_>>()
         .join("");
-    let task_rows = if view.tasks.is_empty() {
-        "<li>No draft tasks yet.</li>".to_string()
-    } else {
-        view.tasks
-            .iter()
-            .map(|task| {
-                format!(
-                    "<li id=\"task-{}\"><strong><a href=\"/tasks/{}\">{}</a></strong> <code>{}</code> [{}]{}<br><small>{}</small><br><small>workspace: <code>{}</code></small>{}</li>",
-                    task.id,
-                    task.id,
-                    html_escape(&task.title),
-                    task.id,
-                    task.state,
-                    task.current_stage
-                        .as_deref()
-                        .map(|stage| format!(" stage={stage}"))
-                        .unwrap_or_default(),
-                    html_escape(&task.goal),
-                    task.workspace_path,
-                    task_action_buttons(task)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    };
+    let board = board_columns(view.tasks);
 
     format!(
         "<!doctype html>\
@@ -76,7 +55,25 @@ pub fn render_home(view: HomeView<'_>) -> String {
         <head>\
           <meta charset=\"utf-8\">\
           <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+          <meta http-equiv=\"refresh\" content=\"5\">\
           <title>Patron</title>\
+          <style>\
+            body {{ font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #f6f0e3; color: #1f1b16; }}\
+            main {{ max-width: 1440px; margin: 0 auto; padding: 24px; }}\
+            .board {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; align-items: start; }}\
+            .column {{ background: #fff9ef; border: 1px solid #d7ccb8; border-radius: 14px; padding: 12px; box-shadow: 0 10px 24px rgba(76, 58, 22, 0.08); }}\
+            .column h3 {{ margin: 0 0 12px 0; }}\
+            .column.blocked {{ background: #fff2ef; border-color: #c65d43; }}\
+            .column.awaiting-human {{ background: #fff8dc; border-color: #b5901a; }}\
+            .task-card {{ background: #ffffff; border: 1px solid #e5ddc9; border-radius: 10px; padding: 10px; margin-bottom: 10px; }}\
+            .task-card:last-child {{ margin-bottom: 0; }}\
+            .task-card p {{ margin: 8px 0; }}\
+            .task-card form {{ margin-top: 8px; }}\
+            .pill {{ display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee4cf; font-size: 0.8rem; margin-right: 6px; }}\
+            .pill.alert {{ background: #f6d5cf; color: #7a1b0e; }}\
+            .pill.waiting {{ background: #f7e6a3; color: #5e4d0c; }}\
+            textarea {{ width: min(100%, 880px); }}\
+          </style>\
         </head>\
         <body>\
           <main>\
@@ -95,8 +92,8 @@ pub fn render_home(view: HomeView<'_>) -> String {
               <textarea id=\"goal\" name=\"goal\" rows=\"6\" cols=\"80\" placeholder=\"Describe the task goal\"></textarea><br>\
               <button type=\"submit\">Create draft task</button>\
             </form>\
-            <h2>Tasks</h2>\
-            <ul>{}</ul>\
+            <h2>Autopilot Board</h2>\
+            <div class=\"board\">{}</div>\
             <h2>Subsystems</h2>\
             <ul>\
               <li>Orchestrator: {}</li>\
@@ -116,11 +113,93 @@ pub fn render_home(view: HomeView<'_>) -> String {
         view.state_store.initial_schema_bytes,
         directories,
         qa_directories,
-        task_rows,
+        board,
         view.orchestrator_status,
         view.runner_status,
         view.qa_status,
         stages,
+    )
+}
+
+fn board_columns(tasks: &[TaskRecord]) -> String {
+    let states = [
+        ("draft", "Draft"),
+        ("ready_for_planning", "Ready For Planning"),
+        ("planning", "Planning"),
+        ("ready_for_development", "Ready For Development"),
+        ("developing", "Developing"),
+        ("ready_for_review", "Ready For Review"),
+        ("reviewing", "Reviewing"),
+        ("ready_for_qa", "Ready For QA"),
+        ("qa_running", "QA Running"),
+        ("fix_required", "Fix Required"),
+        ("ready_for_pr", "Ready For PR"),
+        ("pr_prepared", "PR Prepared"),
+        ("awaiting_human", "Awaiting Human"),
+        ("blocked", "Blocked"),
+    ];
+
+    states
+        .iter()
+        .map(|(state, label)| {
+            let cards = tasks
+                .iter()
+                .filter(|task| task.state == *state)
+                .map(render_task_card)
+                .collect::<Vec<_>>()
+                .join("");
+            let body = if cards.is_empty() {
+                "<p><small>No tasks in this state.</small></p>".to_string()
+            } else {
+                cards
+            };
+            let class_name = match *state {
+                "blocked" => "column blocked",
+                "awaiting_human" => "column awaiting-human",
+                _ => "column",
+            };
+            format!(
+                "<section class=\"{}\"><h3>{}</h3>{}</section>",
+                class_name, label, body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn render_task_card(task: &TaskRecord) -> String {
+    let actions = task_action_buttons(task);
+    let mut pills = Vec::new();
+    if let Some(stage) = task.current_stage.as_deref() {
+        pills.push(format!(
+            "<span class=\"pill\">stage={}</span>",
+            html_escape(stage)
+        ));
+    }
+    if task.state == "blocked" {
+        pills.push("<span class=\"pill alert\">blocked</span>".to_string());
+    }
+    if task.state == "awaiting_human" {
+        pills.push("<span class=\"pill waiting\">human action required</span>".to_string());
+    }
+
+    let blocked_reason = task
+        .blocked_reason_text
+        .as_deref()
+        .map(|reason| format!("<p><small>blocked: {}</small></p>", html_escape(reason)))
+        .unwrap_or_default();
+
+    format!(
+        "<article id=\"task-{}\" class=\"task-card\"><strong><a href=\"/tasks/{}\">{}</a></strong><br><code>{}</code><p>{}</p><p>{}</p><small>workspace: <code>{}</code></small>{}{}</article>",
+        task.id,
+        task.id,
+        html_escape(&task.title),
+        task.id,
+        pills.join(""),
+        html_escape(&task.goal),
+        html_escape(&task.workspace_path),
+        blocked_reason,
+        actions
     )
 }
 
@@ -147,6 +226,10 @@ fn task_action_buttons(task: &TaskRecord) -> String {
         ),
         "ready_for_qa" => format!(
             "<form action=\"/tasks/{}/qa\" method=\"post\"><button type=\"submit\">Run QA</button></form>",
+            task.id
+        ),
+        "ready_for_pr" => format!(
+            "<form action=\"/tasks/{}/prepare-pr\" method=\"post\"><button type=\"submit\">Prepare PR Handoff</button></form>",
             task.id
         ),
         "fix_required" => format!(
@@ -260,6 +343,33 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
         .review_report
         .map(render_preformatted)
         .unwrap_or_else(|| "<p>No review report has been generated yet.</p>".to_string());
+    let pr_summary = view
+        .pr_summary
+        .map(render_preformatted)
+        .unwrap_or_else(|| "<p>No PR summary has been prepared yet.</p>".to_string());
+    let human_actions = if view.human_actions.is_empty() {
+        "<li>No required human actions are currently recorded.</li>".to_string()
+    } else {
+        view.human_actions
+            .iter()
+            .map(|action| {
+                format!(
+                    "<li><strong>{}</strong> [{}] requested by {} at {}<br><small>{}</small>{}</li>",
+                    html_escape(&action.action_type),
+                    html_escape(&action.status),
+                    html_escape(&action.requested_by),
+                    html_escape(&action.requested_at),
+                    html_escape(&action.instructions),
+                    action
+                        .resolution_notes
+                        .as_deref()
+                        .map(|notes| format!("<br><small>resolution: {}</small>", html_escape(notes)))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
 
     let qa_screenshot = view
         .artifacts
@@ -290,6 +400,9 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
             <p>{}</p>\
             <p>Workspace: <code>{}</code></p>\
             {}\
+            {}\
+            <h2>Required Human Actions</h2>\
+            <ul>{}</ul>\
             <h2>QA Report</h2>\
             {}\
             <h2>QA Evidence</h2>\
@@ -298,6 +411,8 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
             <h3>QA Log</h3>\
             {}\
             <h2>Review</h2>\
+            {}\
+            <h2>PR Summary</h2>\
             {}\
             <h2>Artifacts</h2>\
             <ul>{}</ul>\
@@ -319,7 +434,9 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
             .unwrap_or_default(),
         html_escape(&view.task.goal),
         html_escape(&view.task.workspace_path),
+        render_blocked_reason(view.task),
         task_action_buttons(view.task),
+        human_actions,
         qa_report,
         view.task.id,
         view.task.id,
@@ -327,6 +444,7 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
         qa_screenshot,
         qa_log,
         review_report,
+        pr_summary,
         artifacts,
         transitions,
         stage_runs
@@ -338,4 +456,18 @@ fn render_preformatted(value: &str) -> String {
         "<pre style=\"white-space: pre-wrap; border: 1px solid #ccc; padding: 12px; overflow-x: auto;\">{}</pre>",
         html_escape(value)
     )
+}
+
+fn render_blocked_reason(task: &TaskRecord) -> String {
+    match (
+        task.blocked_reason_code.as_deref(),
+        task.blocked_reason_text.as_deref(),
+    ) {
+        (Some(code), Some(text)) => format!(
+            "<p><strong>Blocked reason</strong>: <code>{}</code> {}</p>",
+            html_escape(code),
+            html_escape(text)
+        ),
+        _ => String::new(),
+    }
 }

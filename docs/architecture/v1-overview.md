@@ -392,9 +392,10 @@ Planning must produce:
 V1 should keep these approval points:
 
 - Task creation or task approval
-- Optional plan approval
 - PR review and merge outside the system
 - Manual unblock decisions
+
+V1 does not require plan approval by default. The planning stage should run immediately after task intake unless a future repo-specific policy adds an explicit manual gate.
 
 Avoid adding more gates unless they materially increase trust.
 

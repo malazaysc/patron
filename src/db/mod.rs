@@ -38,6 +38,8 @@ pub struct TaskRecord {
     pub title: String,
     pub goal: String,
     pub state: String,
+    pub blocked_reason_code: Option<String>,
+    pub blocked_reason_text: Option<String>,
     pub current_stage: Option<String>,
     pub workspace_path: String,
     pub handoff_path: String,
@@ -81,6 +83,27 @@ pub struct WorkingArtifactRecord {
     pub media_type: String,
     pub required_for_stage: bool,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanActionRecord {
+    pub id: String,
+    pub task_id: String,
+    pub action_type: String,
+    pub status: String,
+    pub requested_by: String,
+    pub instructions: String,
+    pub requested_at: String,
+    pub resolved_at: Option<String>,
+    pub resolution_notes: Option<String>,
+}
+
+pub struct HumanActionCreate<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub action_type: &'a str,
+    pub requested_by: &'a str,
+    pub instructions: &'a str,
 }
 
 pub struct WorkingArtifactUpsert<'a> {
@@ -172,6 +195,8 @@ pub fn list_tasks(runtime: &RuntimePaths) -> Result<Vec<TaskRecord>, String> {
                 tasks.title,
                 tasks.goal,
                 tasks.state,
+                tasks.blocked_reason_code,
+                tasks.blocked_reason_text,
                 tasks.current_stage,
                 COALESCE(
                     MAX(CASE WHEN working_artifacts.role = 'task_workspace' THEN working_artifacts.relative_path END),
@@ -183,7 +208,7 @@ pub fn list_tasks(runtime: &RuntimePaths) -> Result<Vec<TaskRecord>, String> {
                 ) AS handoff_path
             FROM tasks
             LEFT JOIN working_artifacts ON working_artifacts.task_id = tasks.id
-            GROUP BY tasks.id, tasks.title, tasks.goal, tasks.state, tasks.current_stage
+            GROUP BY tasks.id, tasks.title, tasks.goal, tasks.state, tasks.blocked_reason_code, tasks.blocked_reason_text, tasks.current_stage
             ORDER BY tasks.id DESC",
         )
         .map_err(|error| format!("failed to prepare task listing query: {error}"))?;
@@ -195,9 +220,11 @@ pub fn list_tasks(runtime: &RuntimePaths) -> Result<Vec<TaskRecord>, String> {
                 title: row.get(1)?,
                 goal: row.get(2)?,
                 state: row.get(3)?,
-                current_stage: row.get(4)?,
-                workspace_path: row.get(5)?,
-                handoff_path: row.get(6)?,
+                blocked_reason_code: row.get(4)?,
+                blocked_reason_text: row.get(5)?,
+                current_stage: row.get(6)?,
+                workspace_path: row.get(7)?,
+                handoff_path: row.get(8)?,
             })
         })
         .map_err(|error| format!("failed to query tasks: {error}"))?;
@@ -255,6 +282,8 @@ pub fn get_task(runtime: &RuntimePaths, task_id: &str) -> Result<Option<TaskReco
                 tasks.title,
                 tasks.goal,
                 tasks.state,
+                tasks.blocked_reason_code,
+                tasks.blocked_reason_text,
                 tasks.current_stage,
                 COALESCE(
                     MAX(CASE WHEN working_artifacts.role = 'task_workspace' THEN working_artifacts.relative_path END),
@@ -267,7 +296,7 @@ pub fn get_task(runtime: &RuntimePaths, task_id: &str) -> Result<Option<TaskReco
             FROM tasks
             LEFT JOIN working_artifacts ON working_artifacts.task_id = tasks.id
             WHERE tasks.id = ?1
-            GROUP BY tasks.id, tasks.title, tasks.goal, tasks.state, tasks.current_stage",
+            GROUP BY tasks.id, tasks.title, tasks.goal, tasks.state, tasks.blocked_reason_code, tasks.blocked_reason_text, tasks.current_stage",
         )
         .map_err(|error| format!("failed to prepare task lookup query: {error}"))?;
 
@@ -278,9 +307,11 @@ pub fn get_task(runtime: &RuntimePaths, task_id: &str) -> Result<Option<TaskReco
                 title: row.get(1)?,
                 goal: row.get(2)?,
                 state: row.get(3)?,
-                current_stage: row.get(4)?,
-                workspace_path: row.get(5)?,
-                handoff_path: row.get(6)?,
+                blocked_reason_code: row.get(4)?,
+                blocked_reason_text: row.get(5)?,
+                current_stage: row.get(6)?,
+                workspace_path: row.get(7)?,
+                handoff_path: row.get(8)?,
             })
         })
         .optional()
@@ -356,16 +387,28 @@ pub fn transition_task_state(
 ) -> Result<(), String> {
     let connection = open_connection(&runtime.state_db)?;
     let current_stage = current_stage_for_state(to);
+    let blocked_reason_code = if to == TaskState::Blocked {
+        metadata.reason_code.as_deref()
+    } else {
+        None
+    };
+    let blocked_reason_text = if to == TaskState::Blocked {
+        Some(metadata.reason_text.as_str())
+    } else {
+        None
+    };
     connection
         .execute(
             "UPDATE tasks
-             SET state = ?2, current_stage = ?3, updated_at = ?4
-             WHERE id = ?1 AND state = ?5",
+             SET state = ?2, current_stage = ?3, updated_at = ?4, blocked_reason_code = ?5, blocked_reason_text = ?6
+             WHERE id = ?1 AND state = ?7",
             params![
                 task_id,
                 to.as_str(),
                 current_stage,
                 metadata.occurred_at,
+                blocked_reason_code,
+                blocked_reason_text,
                 from.as_str()
             ],
         )
@@ -460,6 +503,37 @@ pub fn list_stage_runs(
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to decode stage runs for {task_id}: {error}"))
+}
+
+pub fn list_open_stage_runs(runtime: &RuntimePaths) -> Result<Vec<StageRunRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, stage, status, attempt_number, started_at, finished_at, exit_code, error_summary
+             FROM stage_runs
+             WHERE status = 'running'
+             ORDER BY started_at ASC, id ASC",
+        )
+        .map_err(|error| format!("failed to prepare open stage run query: {error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(StageRunRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                stage: row.get(2)?,
+                status: row.get(3)?,
+                attempt_number: row.get(4)?,
+                started_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                exit_code: row.get(7)?,
+                error_summary: row.get(8)?,
+            })
+        })
+        .map_err(|error| format!("failed to query open stage runs: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode open stage runs: {error}"))
 }
 
 pub fn list_state_transitions(
@@ -566,6 +640,63 @@ pub fn get_working_artifact_by_role(
         })
         .optional()
         .map_err(|error| format!("failed to look up artifact {task_id}/{role}: {error}"))
+}
+
+pub fn insert_human_action(
+    runtime: &RuntimePaths,
+    action: HumanActionCreate<'_>,
+) -> Result<(), String> {
+    let connection = open_connection(&runtime.state_db)?;
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO human_actions (
+                id, task_id, action_type, status, requested_by, instructions, requested_at
+            ) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6)",
+            params![
+                action.id,
+                action.task_id,
+                action.action_type,
+                action.requested_by,
+                action.instructions,
+                timestamp_now()
+            ],
+        )
+        .map_err(|error| format!("failed to insert human action {}: {error}", action.id))?;
+    Ok(())
+}
+
+pub fn list_human_actions(
+    runtime: &RuntimePaths,
+    task_id: &str,
+) -> Result<Vec<HumanActionRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, action_type, status, requested_by, instructions, requested_at, resolved_at, resolution_notes
+             FROM human_actions
+             WHERE task_id = ?1
+             ORDER BY requested_at DESC, id DESC",
+        )
+        .map_err(|error| format!("failed to prepare human action query for {task_id}: {error}"))?;
+
+    let rows = statement
+        .query_map([task_id], |row| {
+            Ok(HumanActionRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                action_type: row.get(2)?,
+                status: row.get(3)?,
+                requested_by: row.get(4)?,
+                instructions: row.get(5)?,
+                requested_at: row.get(6)?,
+                resolved_at: row.get(7)?,
+                resolution_notes: row.get(8)?,
+            })
+        })
+        .map_err(|error| format!("failed to query human actions for {task_id}: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode human actions for {task_id}: {error}"))
 }
 
 fn open_connection(path: &Path) -> Result<Connection, String> {

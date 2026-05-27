@@ -3,6 +3,7 @@ mod db;
 mod domain;
 mod orchestrator;
 mod qa;
+mod recovery;
 mod runner;
 mod ui;
 
@@ -21,6 +22,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|error| format!("failed to initialize the Patron runtime layout: {error}"))?;
     db::initialize(&runtime)
         .map_err(|error| format!("failed to initialize the Patron SQLite state: {error}"))?;
+    recovery::reconcile_interrupted_runs(&runtime)
+        .map_err(|error| format!("failed to reconcile interrupted Patron runs: {error}"))?;
 
     let state = app::AppState::new(runtime);
     let router = app::build_router(state);
