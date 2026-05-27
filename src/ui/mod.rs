@@ -38,7 +38,8 @@ pub fn render_home(view: HomeView<'_>) -> String {
             .iter()
             .map(|task| {
                 format!(
-                    "<li><strong>{}</strong> <code>{}</code> [{}]{}<br><small>{}</small><br><small>workspace: <code>{}</code></small>{}</li>",
+                    "<li id=\"task-{}\"><strong>{}</strong> <code>{}</code> [{}]{}<br><small>{}</small><br><small>workspace: <code>{}</code></small>{}</li>",
+                    task.id,
                     html_escape(&task.title),
                     task.id,
                     task.state,
@@ -128,6 +129,10 @@ fn task_action_buttons(task: &TaskRecord) -> String {
         ),
         "ready_for_review" => format!(
             "<form action=\"/tasks/{}/review\" method=\"post\"><button type=\"submit\">Run review</button></form>",
+            task.id
+        ),
+        "ready_for_qa" => format!(
+            "<form action=\"/tasks/{}/qa\" method=\"post\"><button type=\"submit\">Run QA</button></form>",
             task.id
         ),
         "fix_required" => format!(

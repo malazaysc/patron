@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub fn status_label() -> &'static str {
-    "draft intake, planning, development, review, and fix-loop scaffolding available"
+    "draft intake, planning, development, review, and fix-loop scaffolding available; qa delegated to the qa subsystem"
 }
 
 pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecord, String> {
@@ -699,7 +699,7 @@ fn build_planning_package(task: &TaskRecord) -> PlanningPackage {
     );
 
     let qa_steps_md = format!(
-        "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: The task is ready for development\n- Inspect the task state in the Patron UI or SQLite state.\n- Confirm the task moved to `ready_for_development` after planning completed.\n- Expected result: development can start without requiring additional planning work.\n\n## Evidence Requirements\n- Capture the presence of the three planning artifacts.\n- Record the post-planning task state.\n- Preserve any planning errors if the task fails to advance.\n",
+        "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Review package exists for QA handoff\n- Confirm that `development-summary.md` and `review.md` exist in the task workspace.\n- Confirm that `review.md` recorded a passing review outcome before QA started.\n- Expected result: the task has review artifacts and is ready for QA execution.\n\n## Scenario 4: Browser evidence is captured during QA\n- Open the Patron UI in a browser-driven QA pass.\n- Capture a screenshot and HAR file while the task is visible on the board.\n- Expected result: QA leaves behind inspectable browser evidence for the active task.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
         task.id
     );
 

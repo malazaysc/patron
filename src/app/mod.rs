@@ -124,6 +124,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{task_id}/plan", post(run_planning))
         .route("/tasks/{task_id}/develop", post(run_development))
         .route("/tasks/{task_id}/review", post(run_review))
+        .route("/tasks/{task_id}/qa", post(run_qa))
         .route("/tasks/{task_id}/fix", post(run_fix_loop))
         .with_state(state)
 }
@@ -227,6 +228,17 @@ async fn run_fix_loop(
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Fix loop failed</h1><p>{error}</p>")),
+        )
+            .into_response(),
+    }
+}
+
+async fn run_qa(State(state): State<AppState>, AxumPath(task_id): AxumPath<String>) -> Response {
+    match qa::run_qa(state.runtime(), &task_id) {
+        Ok(_) => Redirect::to("/").into_response(),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>QA failed</h1><p>{error}</p>")),
         )
             .into_response(),
     }
