@@ -5,6 +5,7 @@ use axum::{
     Form, Router,
     extract::Path as AxumPath,
     extract::State,
+    http::{HeaderMap, HeaderValue},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -120,6 +121,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/tasks/{task_id}", get(task_detail))
+        .route("/tasks/{task_id}/artifacts/{role}", get(task_artifact))
         .route("/tasks", post(create_task))
         .route("/tasks/{task_id}/plan", post(run_planning))
         .route("/tasks/{task_id}/develop", post(run_development))
@@ -159,6 +162,77 @@ async fn index(State(state): State<AppState>) -> Html<String> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn task_detail(
+    State(state): State<AppState>,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    let runtime = state.runtime();
+    let Some(task) = db::get_task(runtime, &task_id).unwrap_or_default() else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Html(format!("<h1>Task not found</h1><p>{task_id}</p>")),
+        )
+            .into_response();
+    };
+    let transitions = db::list_state_transitions(runtime, &task_id).unwrap_or_default();
+    let stage_runs = db::list_stage_runs(runtime, &task_id).unwrap_or_default();
+    let artifacts = db::list_working_artifacts(runtime, &task_id).unwrap_or_default();
+
+    let qa_report = read_artifact_text(runtime, &task_id, "qa_report_md");
+    let qa_log = read_artifact_text(runtime, &task_id, "qa_log");
+    let review_report = read_artifact_text(runtime, &task_id, "review_md");
+
+    Html(ui::render_task_detail(ui::TaskDetailView {
+        task: &task,
+        transitions: &transitions,
+        stage_runs: &stage_runs,
+        artifacts: &artifacts,
+        qa_report: qa_report.as_deref(),
+        qa_log: qa_log.as_deref(),
+        review_report: review_report.as_deref(),
+    }))
+    .into_response()
+}
+
+async fn task_artifact(
+    State(state): State<AppState>,
+    AxumPath((task_id, role)): AxumPath<(String, String)>,
+) -> Response {
+    let runtime = state.runtime();
+    let Some(artifact) =
+        db::get_working_artifact_by_role(runtime, &task_id, &role).unwrap_or_default()
+    else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Html(format!(
+                "<h1>Artifact not found</h1><p>{task_id}/{role}</p>"
+            )),
+        )
+            .into_response();
+    };
+
+    let full_path = runtime
+        .root
+        .join(artifact.relative_path.trim_start_matches(".patron/"));
+    match std::fs::read(&full_path) {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            if let Ok(content_type) = HeaderValue::from_str(&artifact.media_type) {
+                headers.insert(axum::http::header::CONTENT_TYPE, content_type);
+            }
+            (headers, bytes).into_response()
+        }
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!(
+                "<h1>Artifact read failed</h1><p>{}: {error}</p>",
+                full_path.display()
+            )),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -242,4 +316,14 @@ async fn run_qa(State(state): State<AppState>, AxumPath(task_id): AxumPath<Strin
         )
             .into_response(),
     }
+}
+
+fn read_artifact_text(runtime: &RuntimePaths, task_id: &str, role: &str) -> Option<String> {
+    let artifact = db::get_working_artifact_by_role(runtime, task_id, role)
+        .ok()
+        .flatten()?;
+    let full_path = runtime
+        .root
+        .join(artifact.relative_path.trim_start_matches(".patron/"));
+    std::fs::read_to_string(full_path).ok()
 }

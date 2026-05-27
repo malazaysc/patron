@@ -49,8 +49,38 @@ pub struct StageRunRecord {
     pub task_id: String,
     pub stage: String,
     pub status: String,
+    pub attempt_number: i64,
     pub started_at: String,
     pub finished_at: Option<String>,
+    pub exit_code: Option<i64>,
+    pub error_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateTransitionRecord {
+    pub id: i64,
+    pub task_id: String,
+    pub from_state: Option<String>,
+    pub to_state: String,
+    pub actor_kind: String,
+    pub actor_id: Option<String>,
+    pub reason_code: Option<String>,
+    pub reason_text: String,
+    pub stage_run_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkingArtifactRecord {
+    pub id: String,
+    pub task_id: String,
+    pub stage_run_id: Option<String>,
+    pub artifact_kind: String,
+    pub role: String,
+    pub relative_path: String,
+    pub media_type: String,
+    pub required_for_stage: bool,
+    pub created_at: String,
 }
 
 pub struct WorkingArtifactUpsert<'a> {
@@ -290,8 +320,11 @@ pub fn create_stage_run(
         task_id: task_id.to_string(),
         stage: stage.to_string(),
         status: "running".into(),
+        attempt_number,
         started_at,
         finished_at: None,
+        exit_code: None,
+        error_summary: None,
     })
 }
 
@@ -393,6 +426,146 @@ pub fn upsert_working_artifact(
         .map_err(|error| format!("failed to upsert artifact {artifact_id}: {error}"))?;
 
     Ok(())
+}
+
+pub fn list_stage_runs(
+    runtime: &RuntimePaths,
+    task_id: &str,
+) -> Result<Vec<StageRunRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, stage, status, attempt_number, started_at, finished_at, exit_code, error_summary
+             FROM stage_runs
+             WHERE task_id = ?1
+             ORDER BY started_at DESC, id DESC",
+        )
+        .map_err(|error| format!("failed to prepare stage run query for {task_id}: {error}"))?;
+
+    let rows = statement
+        .query_map([task_id], |row| {
+            Ok(StageRunRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                stage: row.get(2)?,
+                status: row.get(3)?,
+                attempt_number: row.get(4)?,
+                started_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                exit_code: row.get(7)?,
+                error_summary: row.get(8)?,
+            })
+        })
+        .map_err(|error| format!("failed to query stage runs for {task_id}: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode stage runs for {task_id}: {error}"))
+}
+
+pub fn list_state_transitions(
+    runtime: &RuntimePaths,
+    task_id: &str,
+) -> Result<Vec<StateTransitionRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, from_state, to_state, actor_kind, actor_id, reason_code, reason_text, stage_run_id, created_at
+             FROM state_transitions
+             WHERE task_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )
+        .map_err(|error| {
+            format!("failed to prepare transition query for {task_id}: {error}")
+        })?;
+
+    let rows = statement
+        .query_map([task_id], |row| {
+            Ok(StateTransitionRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                from_state: row.get(2)?,
+                to_state: row.get(3)?,
+                actor_kind: row.get(4)?,
+                actor_id: row.get(5)?,
+                reason_code: row.get(6)?,
+                reason_text: row.get(7)?,
+                stage_run_id: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })
+        .map_err(|error| format!("failed to query transitions for {task_id}: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode transitions for {task_id}: {error}"))
+}
+
+pub fn list_working_artifacts(
+    runtime: &RuntimePaths,
+    task_id: &str,
+) -> Result<Vec<WorkingArtifactRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, stage_run_id, artifact_kind, role, relative_path, media_type, required_for_stage, created_at
+             FROM working_artifacts
+             WHERE task_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )
+        .map_err(|error| format!("failed to prepare artifact query for {task_id}: {error}"))?;
+
+    let rows = statement
+        .query_map([task_id], |row| {
+            Ok(WorkingArtifactRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                stage_run_id: row.get(2)?,
+                artifact_kind: row.get(3)?,
+                role: row.get(4)?,
+                relative_path: row.get(5)?,
+                media_type: row.get(6)?,
+                required_for_stage: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| format!("failed to query artifacts for {task_id}: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode artifacts for {task_id}: {error}"))
+}
+
+pub fn get_working_artifact_by_role(
+    runtime: &RuntimePaths,
+    task_id: &str,
+    role: &str,
+) -> Result<Option<WorkingArtifactRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, stage_run_id, artifact_kind, role, relative_path, media_type, required_for_stage, created_at
+             FROM working_artifacts
+             WHERE task_id = ?1 AND role = ?2
+             LIMIT 1",
+        )
+        .map_err(|error| {
+            format!("failed to prepare artifact lookup for {task_id}/{role}: {error}")
+        })?;
+
+    statement
+        .query_row(params![task_id, role], |row| {
+            Ok(WorkingArtifactRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                stage_run_id: row.get(2)?,
+                artifact_kind: row.get(3)?,
+                role: row.get(4)?,
+                relative_path: row.get(5)?,
+                media_type: row.get(6)?,
+                required_for_stage: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })
+        .optional()
+        .map_err(|error| format!("failed to look up artifact {task_id}/{role}: {error}"))
 }
 
 fn open_connection(path: &Path) -> Result<Connection, String> {
