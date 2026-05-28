@@ -349,7 +349,8 @@ pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
         )?;
 
         let workspace_path = runtime.tasks_dir.join(&task.id);
-        let planning_package = build_planning_package(&task);
+        let planning_context = analyze_repo_for_planning(runtime.repo_root(), &task);
+        let planning_package = build_planning_package(&task, &planning_context);
         let task_md = workspace_path.join("task.md");
         let plan_md = workspace_path.join("plan.md");
         let qa_steps_md = workspace_path.join("qa-steps.md");
@@ -419,6 +420,12 @@ pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
         append_planning_log(
             log_path,
             &[
+                format!(
+                    "repo analysis: state={} frameworks={} entries={}",
+                    planning_context.repo_state,
+                    planning_context.frameworks.join(", "),
+                    planning_context.top_level_entries.join(", ")
+                ),
                 format!("generated {}", task_md.display()),
                 format!("generated {}", plan_md.display()),
                 format!("generated {}", qa_steps_md.display()),
@@ -976,6 +983,16 @@ struct ReviewResult {
     findings: Vec<String>,
 }
 
+struct RepoPlanningContext {
+    repo_name: String,
+    repo_state: &'static str,
+    top_level_entries: Vec<String>,
+    notable_files: Vec<String>,
+    frameworks: Vec<String>,
+    implementation_focus: Vec<String>,
+    qa_focus: Vec<String>,
+}
+
 struct IntakeDraft {
     title: String,
     markdown: String,
@@ -1261,15 +1278,32 @@ fn excerpt(value: &str) -> String {
     value.lines().take(8).collect::<Vec<_>>().join("\n")
 }
 
-fn build_planning_package(task: &TaskRecord) -> PlanningPackage {
+fn build_planning_package(task: &TaskRecord, context: &RepoPlanningContext) -> PlanningPackage {
     let sample_app_task = is_sample_app_task(task);
+    let repo_context_md = render_repo_context_markdown(context);
+    let scope_md = render_scope_markdown(task, context);
+    let dependency_md = render_dependency_markdown(context);
+    let step_lines = render_plan_steps(task, context)
+        .into_iter()
+        .enumerate()
+        .map(|(index, step)| format!("{}. {step}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let implementation_focus_md = context
+        .implementation_focus
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let task_md = format!(
-        "# Task\n\n## ID\n`{}`\n\n## Title\n{}\n\n## Problem\n{}\n\n## Scope\n- Build the smallest implementation slice that satisfies the requested goal.\n- Keep the implementation local-first and repository-scoped.\n- Preserve deterministic task progression for later stages.\n\n## Constraints\n- macOS-only local runtime\n- single repository scope\n- runtime state must stay under `/.patron/`\n- avoid hidden automation or untracked side effects\n\n## Acceptance Criteria\n- A planning package exists for this task.\n- The task has `task.md`, `plan.md`, and `qa-steps.md` in its runtime workspace.\n- The task is ready for the development stage.\n\n## Dependencies\n- Rust application scaffold\n- SQLite runtime state\n- `.patron/` task workspace\n\n## Human Approvals\n- Task intake already completed\n- PR review still required later in the pipeline\n",
-        task.id, task.title, task.goal
+        "# Task\n\n## ID\n`{}`\n\n## Title\n{}\n\n## Problem\n{}\n\n## Repository Context\n{}\n\n## Scope\n{}\n\n## Constraints\n- macOS-only local runtime\n- single repository scope\n- runtime state must stay under `/.patron/`\n- avoid hidden automation or untracked side effects\n\n## Acceptance Criteria\n- A planning package exists for this task.\n- The task has `task.md`, `plan.md`, and `qa-steps.md` in its runtime workspace.\n- The task is ready for the development stage.\n- The plan names concrete repository or application targets instead of relying on generic placeholders.\n\n## Dependencies\n{}\n\n## Human Approvals\n- Task intake already completed\n- PR review still required later in the pipeline\n",
+        task.id, task.title, task.goal, repo_context_md, scope_md, dependency_md
     );
 
     let plan_md = format!(
-        "# Plan\n\n## Objective\nPrepare this task for implementation with a bounded development slice.\n\n## Steps\n1. Confirm the existing scaffold and current task context.\n2. Implement the smallest viable change set for the requested goal.\n3. Validate the behavior with code-level checks before QA.\n4. Hand the task to review with clear artifacts and state updates.\n\n## Development Notes\n- Use the task workspace under `/.patron/tasks/{}` as the source of runtime planning context.\n- Keep artifacts human-readable and stage-specific.\n- Avoid relying on chat history for downstream execution.\n{}\n",
+        "# Plan\n\n## Objective\nPrepare this task for implementation with a bounded development slice.\n\n## Steps\n{}\n\n## Implementation Focus\n{}\n\n## Development Notes\n- Use the task workspace under `/.patron/tasks/{}` as the source of runtime planning context.\n- Keep artifacts human-readable and stage-specific.\n- Avoid relying on chat history for downstream execution.\n- Planning must reflect the current repository state instead of assuming a generic scaffold.\n{}\n",
+        step_lines,
+        implementation_focus_md,
         task.id,
         if sample_app_task {
             "\n## Sample App Target\n- This task is intended for the built-in sample app at `/sample-app`.\n- Development and QA should verify target-app behavior instead of Patron UI internals."
@@ -1279,15 +1313,9 @@ fn build_planning_package(task: &TaskRecord) -> PlanningPackage {
     );
 
     let qa_steps_md = if sample_app_task {
-        format!(
-            "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Sample app route loads successfully\n- Open the built-in sample app at `http://127.0.0.1:3000/sample-app`.\n- Confirm the page renders the triage board and interactive controls.\n- Expected result: the sample app is reachable and client-side rendering completes.\n\n## Scenario 4: Browser evidence is captured against the sample app\n- Run browser-driven QA against the sample app route instead of the Patron board.\n- Capture a screenshot and HAR file after the sample app finishes loading.\n- Expected result: QA leaves behind inspectable browser evidence for the sample app flow.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
-            task.id
-        )
+        render_sample_app_qa_steps(task)
     } else {
-        format!(
-            "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Review package exists for QA handoff\n- Confirm that `development-summary.md` and `review.md` exist in the task workspace.\n- Confirm that `review.md` recorded a passing review outcome before QA started.\n- Expected result: the task has review artifacts and is ready for QA execution.\n\n## Scenario 4: Browser evidence is captured during QA\n- Open the Patron UI in a browser-driven QA pass.\n- Capture a screenshot and HAR file while the task is visible on the board.\n- Expected result: QA leaves behind inspectable browser evidence for the active task.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
-            task.id
-        )
+        render_repo_aware_qa_steps(task, context)
     };
 
     PlanningPackage {
@@ -1304,6 +1332,358 @@ fn is_sample_app_task(task: &TaskRecord) -> bool {
         task.goal.to_ascii_lowercase()
     );
     haystack.contains("sample app") || haystack.contains("sample-app")
+}
+
+fn analyze_repo_for_planning(repo_root: &Path, task: &TaskRecord) -> RepoPlanningContext {
+    let top_level_entries = collect_repo_entries(repo_root, 1, 8);
+    let notable_files = collect_repo_entries(repo_root, 2, 10);
+    let frameworks = detect_frameworks(repo_root, task, &notable_files);
+    let implementation_focus = infer_implementation_focus(task, &frameworks, &notable_files);
+    let qa_focus = infer_qa_focus(task, &frameworks);
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown-repo")
+        .to_string();
+    let repo_state = if notable_files.is_empty() {
+        "empty"
+    } else {
+        "existing"
+    };
+
+    RepoPlanningContext {
+        repo_name,
+        repo_state,
+        top_level_entries,
+        notable_files,
+        frameworks,
+        implementation_focus,
+        qa_focus,
+    }
+}
+
+fn collect_repo_entries(repo_root: &Path, depth: usize, limit: usize) -> Vec<String> {
+    let mut entries = Vec::new();
+    visit_repo_entries(repo_root, repo_root, depth, limit, &mut entries);
+    entries.sort();
+    entries.truncate(limit);
+    entries
+}
+
+fn visit_repo_entries(
+    root: &Path,
+    current: &Path,
+    remaining_depth: usize,
+    limit: usize,
+    entries: &mut Vec<String>,
+) {
+    if remaining_depth == 0 || entries.len() >= limit {
+        return;
+    }
+
+    let Ok(read_dir) = fs::read_dir(current) else {
+        return;
+    };
+
+    for entry in read_dir.flatten() {
+        if entries.len() >= limit {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if should_skip_repo_entry(&name) {
+            continue;
+        }
+
+        if let Ok(relative) = path.strip_prefix(root) {
+            entries.push(relative.display().to_string());
+        }
+
+        if path.is_dir() {
+            visit_repo_entries(
+                root,
+                &path,
+                remaining_depth.saturating_sub(1),
+                limit,
+                entries,
+            );
+        }
+    }
+}
+
+fn should_skip_repo_entry(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".patron" | "target" | "node_modules" | "__pycache__" | ".venv" | "venv"
+    )
+}
+
+fn detect_frameworks(repo_root: &Path, task: &TaskRecord, notable_files: &[String]) -> Vec<String> {
+    let mut frameworks = Vec::new();
+    let goal = format!("{}\n{}", task.title, task.goal).to_ascii_lowercase();
+    let has = |needle: &str| notable_files.iter().any(|entry| entry.contains(needle));
+
+    if goal.contains("django")
+        || has("manage.py")
+        || has("requirements.txt")
+        || has("pyproject.toml")
+    {
+        frameworks.push("Django".to_string());
+    }
+    if goal.contains("htmx") || has("templates") {
+        frameworks.push("HTMX".to_string());
+    }
+    if goal.contains("alpine") || goal.contains("alpine.js") {
+        frameworks.push("Alpine.js".to_string());
+    }
+    if goal.contains("sqlite") || goal.contains("sqlite3") {
+        frameworks.push("SQLite".to_string());
+    }
+    if has("Cargo.toml") && repo_root.join("src").exists() {
+        frameworks.push("Rust".to_string());
+    }
+    if frameworks.is_empty() {
+        frameworks.push("Undetermined".to_string());
+    }
+    frameworks
+}
+
+fn infer_implementation_focus(
+    task: &TaskRecord,
+    frameworks: &[String],
+    notable_files: &[String],
+) -> Vec<String> {
+    let haystack = format!("{}\n{}", task.title, task.goal).to_ascii_lowercase();
+    let mut focus = Vec::new();
+
+    if frameworks.iter().any(|framework| framework == "Django") {
+        if notable_files.is_empty() {
+            focus.push("Scaffold the Django project and the first application module.".to_string());
+        } else {
+            focus.push(
+                "Extend the existing Django project instead of creating a parallel scaffold."
+                    .to_string(),
+            );
+        }
+    }
+    if haystack.contains("contact") {
+        focus.push(
+            "Model a contact record with the fields needed for a credible CRM v1.".to_string(),
+        );
+    }
+    if haystack.contains("note") {
+        focus.push("Add note records that can be attached to a specific contact.".to_string());
+    }
+    if haystack.contains("task") {
+        focus.push("Add task records that can optionally relate back to a contact.".to_string());
+    }
+    if frameworks.iter().any(|framework| framework == "HTMX") {
+        focus.push(
+            "Use HTMX to keep create and update flows visibly interactive without a SPA shell."
+                .to_string(),
+        );
+    }
+    if frameworks.iter().any(|framework| framework == "Alpine.js") {
+        focus.push(
+            "Reserve Alpine.js for lightweight local state and UI affordances only.".to_string(),
+        );
+    }
+    if focus.is_empty() {
+        focus.push("Implement the smallest repo-aware delivery slice that satisfies the requested outcome.".to_string());
+    }
+
+    focus
+}
+
+fn infer_qa_focus(task: &TaskRecord, frameworks: &[String]) -> Vec<String> {
+    let haystack = format!("{}\n{}", task.title, task.goal).to_ascii_lowercase();
+    let mut focus = Vec::new();
+
+    if haystack.contains("contact") {
+        focus.push("Creating a contact through the primary UI flow.".to_string());
+    }
+    if haystack.contains("note") {
+        focus.push(
+            "Adding a note to a contact and seeing it render in the contact view.".to_string(),
+        );
+    }
+    if haystack.contains("task") {
+        focus.push("Creating a task that is visibly linked to a contact.".to_string());
+    }
+    if frameworks.iter().any(|framework| framework == "HTMX") {
+        focus.push(
+            "Verifying that updates appear through HTMX-driven partial refreshes.".to_string(),
+        );
+    }
+    if focus.is_empty() {
+        focus.push("Verifying the main requested behavior through the application UI.".to_string());
+    }
+
+    focus
+}
+
+fn render_repo_context_markdown(context: &RepoPlanningContext) -> String {
+    let top_level = if context.top_level_entries.is_empty() {
+        "- No top-level project files were detected yet.".to_string()
+    } else {
+        context
+            .top_level_entries
+            .iter()
+            .map(|entry| format!("- `{entry}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let notable = if context.notable_files.is_empty() {
+        "- The repository appears effectively empty, so planning should include initial scaffolding work.".to_string()
+    } else {
+        context
+            .notable_files
+            .iter()
+            .map(|entry| format!("- `{entry}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let frameworks = context
+        .frameworks
+        .iter()
+        .map(|framework| format!("- {framework}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "- Repository: `{}`\n- Repo state: `{}`\n- Detected stack signals:\n{}\n- Top-level entries:\n{}\n- Notable files:\n{}",
+        context.repo_name, context.repo_state, frameworks, top_level, notable
+    )
+}
+
+fn render_scope_markdown(task: &TaskRecord, context: &RepoPlanningContext) -> String {
+    let mut bullets = vec![
+        "- Build the smallest implementation slice that satisfies the requested goal.".to_string(),
+        "- Keep the implementation local-first and repository-scoped.".to_string(),
+        "- Preserve deterministic task progression for later stages.".to_string(),
+    ];
+
+    bullets.extend(
+        context
+            .implementation_focus
+            .iter()
+            .map(|item| format!("- {item}")),
+    );
+
+    if task.goal.to_ascii_lowercase().contains("crm") {
+        bullets.push(
+            "- Keep the initial CRM slice focused on contacts, notes, and related tasks rather than broader sales workflows."
+                .to_string(),
+        );
+    }
+
+    bullets.join("\n")
+}
+
+fn render_dependency_markdown(context: &RepoPlanningContext) -> String {
+    let mut bullets = vec!["- `.patron/` task workspace".to_string()];
+    if context.repo_state == "empty" {
+        bullets.push("- Initial application scaffold work in the target repository.".to_string());
+    }
+    bullets.extend(
+        context
+            .frameworks
+            .iter()
+            .filter(|framework| framework.as_str() != "Undetermined")
+            .map(|framework| format!("- {framework} project dependencies or configuration")),
+    );
+    if bullets.len() == 1 {
+        bullets.push("- Existing repository files identified during planning.".to_string());
+    }
+    bullets.join("\n")
+}
+
+fn render_plan_steps(task: &TaskRecord, context: &RepoPlanningContext) -> Vec<String> {
+    let haystack = format!("{}\n{}", task.title, task.goal).to_ascii_lowercase();
+    let mut steps = Vec::new();
+
+    if context.repo_state == "empty" {
+        steps.push(
+            "Confirm the repository is still empty enough to require initial scaffolding."
+                .to_string(),
+        );
+    } else {
+        steps.push("Inspect the existing repository structure and confirm the most relevant implementation targets.".to_string());
+    }
+
+    if context
+        .frameworks
+        .iter()
+        .any(|framework| framework == "Django")
+    {
+        if context.repo_state == "empty" {
+            steps.push(
+                "Create the Django project and a first app that will hold the CRM functionality."
+                    .to_string(),
+            );
+        } else {
+            steps.push("Locate the existing Django project/app boundaries and extend them without duplicating structure.".to_string());
+        }
+    }
+
+    if haystack.contains("contact") && haystack.contains("note") && haystack.contains("task") {
+        steps.push("Define the contact, note, and related task data model along with the relationship boundaries for v1.".to_string());
+        steps.push("Implement the first CRUD-oriented UI slice for creating and browsing contacts with linked notes and tasks.".to_string());
+    } else {
+        steps.push("Implement the smallest viable change set for the requested goal.".to_string());
+    }
+
+    if context
+        .frameworks
+        .iter()
+        .any(|framework| framework == "HTMX")
+    {
+        steps.push("Use HTMX-driven interactions for the key create or update workflows so the behavior is easy to verify in QA.".to_string());
+    }
+
+    steps.push(
+        "Validate the changed behavior locally and hand off reviewable artifacts before QA begins."
+            .to_string(),
+    );
+    steps
+}
+
+fn render_sample_app_qa_steps(task: &TaskRecord) -> String {
+    format!(
+        "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Sample app route loads successfully\n- Open the built-in sample app at `http://127.0.0.1:3000/sample-app`.\n- Confirm the page renders the triage board and interactive controls.\n- Expected result: the sample app is reachable and client-side rendering completes.\n\n## Scenario 4: Browser evidence is captured against the sample app\n- Run browser-driven QA against the sample app route instead of the Patron board.\n- Capture a screenshot and HAR file after the sample app finishes loading.\n- Expected result: QA leaves behind inspectable browser evidence for the sample app flow.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
+        task.id
+    )
+}
+
+fn render_repo_aware_qa_steps(task: &TaskRecord, context: &RepoPlanningContext) -> String {
+    let behavior_lines = context
+        .qa_focus
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            format!(
+                "## Scenario {}: {}\n- Execute the primary UI flow for this behavior.\n- Confirm the visible state matches the planned outcome.\n- Expected result: {} is working end to end.\n",
+                index + 3,
+                item,
+                item
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let target_hint = if context
+        .frameworks
+        .iter()
+        .any(|framework| framework == "Django")
+    {
+        "- Start the local Django application before browser-driven QA begins.\n- Use the target application UI as the verification surface rather than the Patron board.\n"
+    } else {
+        "- Start the target application before browser-driven QA begins.\n"
+    };
+
+    format!(
+        "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal and repository state\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured, the plan names concrete repository/application targets, and the repo state is reflected accurately.\n- Expected result: the planning package is aligned with the repository and is understandable by a human.\n\n{}## Evidence Requirements\n{}- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
+        task.id, behavior_lines, target_hint
+    )
 }
 
 fn validate_required_artifacts(paths: &[&Path]) -> Result<(), String> {
@@ -1432,8 +1812,8 @@ fn parse_task_state(state: &str) -> Result<TaskState, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixLoopSource, TaskRecord, build_development_summary, build_fix_log_entry,
-        build_planning_package, derive_title, review_development_outputs,
+        FixLoopSource, RepoPlanningContext, TaskRecord, build_development_summary,
+        build_fix_log_entry, build_planning_package, derive_title, review_development_outputs,
     };
 
     #[test]
@@ -1453,22 +1833,74 @@ mod tests {
 
     #[test]
     fn planning_package_contains_human_readable_qa_scenarios() {
-        let package = build_planning_package(&TaskRecord {
-            id: "TASK-0001".into(),
-            title: "Build draft intake".into(),
-            goal: "Build the draft task intake flow".into(),
-            state: "draft".into(),
-            blocked_reason_code: None,
-            blocked_reason_text: None,
-            current_stage: None,
-            workspace_path: ".patron/tasks/TASK-0001".into(),
-            handoff_path: ".patron/tasks/TASK-0001/orchestrator-handoff.md".into(),
-        });
+        let package = build_planning_package(
+            &TaskRecord {
+                id: "TASK-0001".into(),
+                title: "Build draft intake".into(),
+                goal: "Build the draft task intake flow".into(),
+                state: "draft".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
+                current_stage: None,
+                workspace_path: ".patron/tasks/TASK-0001".into(),
+                handoff_path: ".patron/tasks/TASK-0001/orchestrator-handoff.md".into(),
+            },
+            &test_repo_context(
+                "existing",
+                &["src", "Cargo.toml"],
+                &["Rust"],
+                &["runner flow"],
+                &["task UI"],
+            ),
+        );
 
         assert!(package.task_md.contains("# Task"));
         assert!(package.plan_md.contains("# Plan"));
         assert!(package.qa_steps_md.contains("## Scenario 1"));
         assert!(package.qa_steps_md.contains("Expected result"));
+    }
+
+    #[test]
+    fn planning_package_mentions_repo_context_and_specific_targets() {
+        let package = build_planning_package(
+            &TaskRecord {
+                id: "TASK-0100".into(),
+                title: "Build CRM slice".into(),
+                goal: "Create a small CRM using django htmx alpine.js and sqlite3 with contacts notes and related tasks".into(),
+                state: "draft".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
+                current_stage: None,
+                workspace_path: ".patron/tasks/TASK-0100".into(),
+                handoff_path: ".patron/tasks/TASK-0100/orchestrator-handoff.md".into(),
+            },
+            &test_repo_context(
+                "empty",
+                &[],
+                &["Django", "HTMX", "Alpine.js", "SQLite"],
+                &[
+                    "Scaffold the Django project and the first application module.",
+                    "Model a contact record with the fields needed for a credible CRM v1.",
+                ],
+                &[
+                    "Creating a contact through the primary UI flow.",
+                    "Adding a note to a contact and seeing it render in the contact view.",
+                ],
+            ),
+        );
+
+        assert!(package.task_md.contains("## Repository Context"));
+        assert!(package.task_md.contains("Repo state: `empty`"));
+        assert!(
+            package
+                .plan_md
+                .contains("Create the Django project and a first app")
+        );
+        assert!(
+            package
+                .qa_steps_md
+                .contains("Creating a contact through the primary UI flow.")
+        );
     }
 
     #[test]
@@ -1539,5 +1971,32 @@ mod tests {
         assert!(entry.contains("Source stage: `review`"));
         assert!(entry.contains("Missing section"));
         assert!(entry.contains("ready_for_development"));
+    }
+
+    fn test_repo_context(
+        repo_state: &'static str,
+        notable_files: &[&str],
+        frameworks: &[&str],
+        implementation_focus: &[&str],
+        qa_focus: &[&str],
+    ) -> RepoPlanningContext {
+        RepoPlanningContext {
+            repo_name: "test-repo".into(),
+            repo_state,
+            top_level_entries: notable_files
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            notable_files: notable_files
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            frameworks: frameworks.iter().map(|value| value.to_string()).collect(),
+            implementation_focus: implementation_focus
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            qa_focus: qa_focus.iter().map(|value| value.to_string()).collect(),
+        }
     }
 }
