@@ -13,16 +13,20 @@ This checklist defines the minimum credible first-run evaluation for Patron in a
 
 1. Install Patron with `cargo install --path /path/to/patron`.
 2. Clone or create a fresh repository and `cd` to its root.
-3. Run `patron doctor`.
-4. Run `patron init`.
-5. Start Patron with `patron serve`.
-6. Open `http://127.0.0.1:3000`.
-7. Confirm the dashboard shows the correct repository name, branch, and runtime root.
-8. Open `/sample-app` and confirm the sample application renders.
-9. Create one task from the sample app task pack.
-10. Run the task through planning, development, review, QA, and PR preparation as far as the current implementation allows.
-11. Inspect the task detail page.
-12. Confirm artifacts, logs, state history, and QA evidence are visible.
+3. Run `git init` if the repository was not already initialized.
+4. Run `patron doctor`.
+5. Run `patron init`.
+6. Start Patron with `patron serve`.
+7. Open `http://127.0.0.1:3000`.
+8. Confirm the dashboard shows the correct repository name, branch, and runtime root.
+9. Open `/intake` and confirm the orchestrator task-definition console renders.
+10. Open `/sample-app` and confirm the sample application renders.
+11. Start one intake session from the sample app task pack.
+12. Confirm Patron either asks a focused follow-up question or generates a draft immediately.
+13. Approve the draft into a real task.
+14. Run the task through planning, development, review, QA, and PR preparation as far as the current implementation allows.
+15. Inspect the task detail page.
+16. Confirm artifacts, logs, state history, activity feed, and QA evidence are visible.
 
 ## Expected Results
 
@@ -30,10 +34,12 @@ This checklist defines the minimum credible first-run evaluation for Patron in a
 - `state.db` exists under `/.patron/`
 - the setup screen disappears after successful init
 - dashboard repository context matches the active repository
+- the orchestrator intake console is available at `/intake`
 - sample app route loads successfully
 - task workspaces are created under `/.patron/tasks/`
 - stage runs are created under `/.patron/runs/`
 - QA captures `qa-report.md`, screenshot, HAR, and QA log
+- intake sessions and activity events are persisted in SQLite
 - blocked or fix-loop states are clearly visible when triggered
 
 ## Failure Reporting

@@ -126,7 +126,7 @@ pub fn inspect(runtime: &RuntimePaths, repo: RepoContext) -> BootstrapStatus {
 
     if !repo.is_git_repo {
         blockers.push(
-            "Patron must run from a git repository root or a child directory inside a git repository."
+            "Patron must run from a git repository root or a child directory inside a git repository. Run `git init` first if this is a brand new project."
                 .into(),
         );
     }
@@ -165,6 +165,12 @@ pub fn initialize_runtime(
     runtime: &RuntimePaths,
     repo: &RepoContext,
 ) -> Result<BootstrapStatus, String> {
+    if !repo.is_git_repo {
+        return Err(
+            "Patron initialization requires a git repository. Run `git init` in this project first."
+                .into(),
+        );
+    }
     runtime
         .ensure_layout()
         .map_err(|error| format!("failed to initialize Patron runtime layout: {error}"))?;

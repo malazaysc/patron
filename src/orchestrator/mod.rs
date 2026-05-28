@@ -3,7 +3,10 @@ use std::path::Path;
 
 use crate::{
     app::RuntimePaths,
-    db::{self, HumanActionCreate, TaskRecord, WorkingArtifactUpsert},
+    db::{
+        self, ActivityEventCreate, HumanActionCreate, IntakeMessageRecord, IntakeSessionRecord,
+        IntakeSessionUpdate, TaskRecord, WorkingArtifactUpsert,
+    },
     domain::task_lifecycle::{
         ActorKind, HumanAction, TaskState, TaskStateMachine, TransitionMetadata,
     },
@@ -15,11 +18,134 @@ pub fn status_label() -> &'static str {
 }
 
 pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecord, String> {
+    let title = derive_title(goal.trim());
+    let handoff = format!(
+        "# Orchestrator Handoff\n\n## Goal\n{}\n\n## Next Step\nConvert this draft task into a structured planning package.\n",
+        goal.trim()
+    );
+    create_task_with_handoff(runtime, &title, goal, &handoff)
+}
+
+pub fn start_intake_session(
+    runtime: &RuntimePaths,
+    goal: &str,
+) -> Result<IntakeSessionRecord, String> {
     let trimmed_goal = goal.trim();
     if trimmed_goal.is_empty() {
         return Err("goal input cannot be empty".into());
     }
 
+    let session = db::create_intake_session(runtime, trimmed_goal)?;
+    db::insert_intake_message(runtime, &session.id, "user", "goal", trimmed_goal)?;
+    db::record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "intake",
+            scope_id: &session.id,
+            task_id: None,
+            event_kind: "user_goal_received",
+            headline: "Goal received",
+            detail: Some(trimmed_goal),
+        },
+    )?;
+    advance_intake_session(runtime, &session.id)
+}
+
+pub fn reply_intake_session(
+    runtime: &RuntimePaths,
+    session_id: &str,
+    reply: &str,
+) -> Result<IntakeSessionRecord, String> {
+    let trimmed_reply = reply.trim();
+    if trimmed_reply.is_empty() {
+        return Err("reply input cannot be empty".into());
+    }
+    let session = db::get_intake_session(runtime, session_id)?
+        .ok_or_else(|| format!("intake session {session_id} was not found"))?;
+    if session.status == "task_created" {
+        return Err("this intake session has already been approved into a task".into());
+    }
+    db::insert_intake_message(runtime, session_id, "user", "answer", trimmed_reply)?;
+    db::record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "intake",
+            scope_id: session_id,
+            task_id: None,
+            event_kind: "user_reply_received",
+            headline: "Intake reply received",
+            detail: Some(trimmed_reply),
+        },
+    )?;
+    advance_intake_session(runtime, session_id)
+}
+
+pub fn approve_intake_session(
+    runtime: &RuntimePaths,
+    session_id: &str,
+) -> Result<TaskRecord, String> {
+    let session = db::get_intake_session(runtime, session_id)?
+        .ok_or_else(|| format!("intake session {session_id} was not found"))?;
+    if session.status != "draft_ready" {
+        return Err("the intake draft is not ready for approval yet".into());
+    }
+    let draft_markdown = session
+        .draft_markdown
+        .as_deref()
+        .ok_or_else(|| "draft content is missing".to_string())?;
+    let draft_title = session
+        .draft_title
+        .as_deref()
+        .ok_or_else(|| "draft title is missing".to_string())?;
+    let handoff = format!(
+        "# Orchestrator Handoff\n\n## Intake Session\n`{}`\n\n{}\n",
+        session.id, draft_markdown
+    );
+    let task = create_task_with_handoff(runtime, draft_title, &session.initial_goal, &handoff)?;
+    db::update_intake_session(
+        runtime,
+        session_id,
+        IntakeSessionUpdate {
+            status: "task_created",
+            draft_title: session.draft_title.as_deref(),
+            draft_markdown: session.draft_markdown.as_deref(),
+            task_id: Some(task.id.as_str()),
+        },
+    )?;
+    db::insert_intake_message(
+        runtime,
+        session_id,
+        "system",
+        "event",
+        &format!(
+            "Draft approved and materialized as task `{}`. Next step: run planning.",
+            task.id
+        ),
+    )?;
+    db::record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "intake",
+            scope_id: session_id,
+            task_id: Some(task.id.as_str()),
+            event_kind: "intake_approved",
+            headline: "Intake approved into task",
+            detail: Some(task.id.as_str()),
+        },
+    )?;
+    Ok(task)
+}
+
+fn create_task_with_handoff(
+    runtime: &RuntimePaths,
+    title: &str,
+    goal: &str,
+    handoff_body: &str,
+) -> Result<TaskRecord, String> {
+    let trimmed_goal = goal.trim();
+    if trimmed_goal.is_empty() {
+        return Err("goal input cannot be empty".into());
+    }
     let task_id = db::next_task_id(runtime)?;
     let workspace_relative = format!(".patron/tasks/{task_id}");
     let workspace_path = runtime.tasks_dir.join(&task_id);
@@ -31,12 +157,11 @@ pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecor
     })?;
 
     let handoff_path = workspace_path.join("orchestrator-handoff.md");
-    let title = derive_title(trimmed_goal);
     let handoff = format!(
-        "# Orchestrator Handoff\n\nTask ID: `{}`\nState: `{}`\n\n## Goal\n{}\n\n## Next Step\nConvert this draft task into a structured planning package.\n",
+        "# Task ID\n`{}`\n\n# State\n`{}`\n\n{}\n",
         task_id,
         TaskState::Draft.as_str(),
-        trimmed_goal
+        handoff_body.trim()
     );
     fs::write(&handoff_path, handoff).map_err(|error| {
         format!(
@@ -47,7 +172,7 @@ pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecor
 
     let task = TaskRecord {
         id: task_id.clone(),
-        title,
+        title: title.to_string(),
         goal: trimmed_goal.to_string(),
         state: TaskState::Draft.as_str().to_string(),
         blocked_reason_code: None,
@@ -61,6 +186,92 @@ pub fn create_draft_task(runtime: &RuntimePaths, goal: &str) -> Result<TaskRecor
     db::register_workspace_artifact(runtime, &task_id, &workspace_relative)?;
 
     Ok(task)
+}
+
+fn advance_intake_session(
+    runtime: &RuntimePaths,
+    session_id: &str,
+) -> Result<IntakeSessionRecord, String> {
+    let session = db::get_intake_session(runtime, session_id)?
+        .ok_or_else(|| format!("intake session {session_id} was not found"))?;
+    let messages = db::list_intake_messages(runtime, session_id)?;
+    let user_turns = messages
+        .iter()
+        .filter(|message| message.author_kind == "user")
+        .count();
+    let user_context = collect_user_context(&messages);
+    let follow_ups =
+        determine_follow_up_questions(&session.initial_goal, &user_context, user_turns);
+
+    if !follow_ups.is_empty() {
+        let prompt = format!(
+            "Before I turn this into a delivery task, I need a bit more structure:\n\n{}",
+            follow_ups
+                .iter()
+                .enumerate()
+                .map(|(index, question)| format!("{}. {}", index + 1, question))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        db::insert_intake_message(runtime, session_id, "orchestrator", "follow_up", &prompt)?;
+        db::record_activity_event(
+            runtime,
+            ActivityEventCreate {
+                scope_kind: "intake",
+                scope_id: session_id,
+                task_id: None,
+                event_kind: "follow_up_requested",
+                headline: "Orchestrator requested follow-up",
+                detail: Some(&prompt),
+            },
+        )?;
+        db::update_intake_session(
+            runtime,
+            session_id,
+            IntakeSessionUpdate {
+                status: "awaiting_input",
+                draft_title: None,
+                draft_markdown: None,
+                task_id: session.task_id.as_deref(),
+            },
+        )?;
+    } else {
+        let draft = build_intake_draft(&session.initial_goal, &user_context);
+        db::insert_intake_message(
+            runtime,
+            session_id,
+            "orchestrator",
+            "draft",
+            &format!(
+                "I turned the conversation into a draft task package. Review it below, refine it if needed, or approve it to create a pipeline task.\n\nProposed title: {}",
+                draft.title
+            ),
+        )?;
+        db::record_activity_event(
+            runtime,
+            ActivityEventCreate {
+                scope_kind: "intake",
+                scope_id: session_id,
+                task_id: None,
+                event_kind: "draft_ready",
+                headline: "Task-definition draft ready",
+                detail: Some(&draft.title),
+            },
+        )?;
+        db::update_intake_session(
+            runtime,
+            session_id,
+            IntakeSessionUpdate {
+                status: "draft_ready",
+                draft_title: Some(&draft.title),
+                draft_markdown: Some(&draft.markdown),
+                task_id: session.task_id.as_deref(),
+            },
+        )?;
+    }
+
+    db::get_intake_session(runtime, session_id)?
+        .ok_or_else(|| format!("intake session {session_id} disappeared during update"))
 }
 
 pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
@@ -765,6 +976,11 @@ struct ReviewResult {
     findings: Vec<String>,
 }
 
+struct IntakeDraft {
+    title: String,
+    markdown: String,
+}
+
 struct FixLoopSource {
     source_stage: &'static str,
     source_path: std::path::PathBuf,
@@ -838,6 +1054,178 @@ fn build_pr_summary(task: &TaskRecord, review_md: &str, qa_report_md: &str) -> S
         excerpt(review_md),
         excerpt(qa_report_md)
     )
+}
+
+fn collect_user_context(messages: &[IntakeMessageRecord]) -> String {
+    messages
+        .iter()
+        .filter(|message| message.author_kind == "user")
+        .map(|message| message.body.trim())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn determine_follow_up_questions(goal: &str, context: &str, user_turns: usize) -> Vec<String> {
+    if user_turns >= 2 {
+        return Vec::new();
+    }
+
+    let haystack = format!(
+        "{}\n{}",
+        goal.to_ascii_lowercase(),
+        context.to_ascii_lowercase()
+    );
+    let mut questions = Vec::new();
+
+    if !contains_any(
+        &haystack,
+        &[
+            "django", "rust", "htmx", "alpine", "sqlite", "postgres", "react", "vue", "tailwind",
+        ],
+    ) {
+        questions.push(
+            "What technical constraints or stack choices should Patron preserve while planning this work?"
+                .to_string(),
+        );
+    }
+
+    if !contains_any(
+        &haystack,
+        &[
+            "should",
+            "must",
+            "allow",
+            "acceptance",
+            "done",
+            "verify",
+            "qa",
+            "test",
+        ],
+    ) {
+        questions.push(
+            "What should be true when this task is considered successful from a user-behavior perspective?"
+                .to_string(),
+        );
+    }
+
+    if !contains_any(
+        &haystack,
+        &[
+            "page", "screen", "contact", "note", "task", "workflow", "board", "form", "entity",
+            "model",
+        ],
+    ) {
+        questions.push(
+            "What are the main objects or workflows this task should cover in v1?".to_string(),
+        );
+    }
+
+    questions.truncate(3);
+    questions
+}
+
+fn build_intake_draft(goal: &str, context: &str) -> IntakeDraft {
+    let title = derive_title(goal);
+    let scope = build_scope_bullets(goal, context);
+    let constraints = build_constraint_bullets(goal, context);
+    let acceptance = build_acceptance_bullets(goal, context);
+    let qa = build_qa_bullets(goal, context);
+    let assumptions = build_assumption_bullets(goal, context);
+    let markdown = format!(
+        "# Draft Task Package\n\n## Goal\n{}\n\n## Scope\n{}\n\n## Constraints\n{}\n\n## Acceptance Criteria\n{}\n\n## QA Scenarios\n{}\n\n## Assumptions\n{}\n",
+        goal.trim(),
+        scope,
+        constraints,
+        acceptance,
+        qa,
+        assumptions
+    );
+
+    IntakeDraft { title, markdown }
+}
+
+fn build_scope_bullets(goal: &str, context: &str) -> String {
+    let mut bullets = vec![
+        "Build the smallest implementation slice that satisfies the requested outcome.".to_string(),
+        "Keep the work deterministic, observable, and easy to review.".to_string(),
+    ];
+    if contains_any(
+        &format!("{}\n{}", goal, context).to_ascii_lowercase(),
+        &["contact", "note", "task"],
+    ) {
+        bullets.push(
+            "Model the primary records and the key user flows around creating, viewing, and relating them."
+                .to_string(),
+        );
+    }
+    bullets
+        .into_iter()
+        .map(|entry| format!("- {entry}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_constraint_bullets(goal: &str, context: &str) -> String {
+    let haystack = format!("{}\n{}", goal, context).to_ascii_lowercase();
+    let mut bullets = Vec::new();
+    for keyword in ["django", "htmx", "alpine", "sqlite", "sqlite3", "macos"] {
+        if haystack.contains(keyword) {
+            bullets.push(format!(
+                "- Preserve the `{keyword}` constraint from the intake."
+            ));
+        }
+    }
+    if bullets.is_empty() {
+        bullets.push(
+            "- Preserve the repository and stack constraints described during intake.".to_string(),
+        );
+    }
+    bullets.push("- Prefer simple, maintainable behavior over hidden automation.".to_string());
+    bullets.join("\n")
+}
+
+fn build_acceptance_bullets(goal: &str, context: &str) -> String {
+    let summary = summarize_behavior(goal, context);
+    [
+        format!("- The resulting change clearly satisfies: {summary}."),
+        "- The workflow is understandable by a human reviewer without replaying chat context."
+            .to_string(),
+        "- QA can validate the behavior with explicit human-readable steps.".to_string(),
+    ]
+    .join("\n")
+}
+
+fn build_qa_bullets(goal: &str, context: &str) -> String {
+    let subject = summarize_behavior(goal, context);
+    [
+        format!("- Exercise the main happy-path workflow for {subject}."),
+        "- Verify that the visible UI/state changes match the intended outcome.".to_string(),
+        "- Capture enough evidence for a human to trust the result.".to_string(),
+    ]
+    .join("\n")
+}
+
+fn build_assumption_bullets(goal: &str, context: &str) -> String {
+    let mut bullets = Vec::new();
+    if determine_follow_up_questions(goal, context, 2).is_empty() && context.trim().is_empty() {
+        bullets
+            .push("- No extra clarifications were captured beyond the initial goal.".to_string());
+    }
+    bullets.push("- Patron should preserve missing details as explicit assumptions instead of inventing hidden requirements.".to_string());
+    bullets.join("\n")
+}
+
+fn summarize_behavior(goal: &str, context: &str) -> String {
+    let joined = format!("{} {}", goal.trim(), context.trim());
+    joined
+        .split_whitespace()
+        .take(18)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 fn review_development_outputs(

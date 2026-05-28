@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::bootstrap::BootstrapStatus;
 use crate::db::{
-    HumanActionRecord, StageRunRecord, StateStoreStatus, StateTransitionRecord, TaskRecord,
-    WorkingArtifactRecord,
+    ActivityEventRecord, HumanActionRecord, IntakeMessageRecord, IntakeSessionRecord,
+    StageRunRecord, StateStoreStatus, StateTransitionRecord, TaskRecord, WorkingArtifactRecord,
 };
 use crate::domain::TASK_PIPELINE_STAGES;
 
@@ -16,7 +16,10 @@ pub struct DashboardView<'a> {
     pub runtime_root: &'a std::path::Path,
     pub state_store: &'a StateStoreStatus<'a>,
     pub tasks: &'a [TaskRecord],
+    pub active_runs: &'a [StageRunRecord],
     pub recent_runs: &'a [StageRunRecord],
+    pub intake_sessions: &'a [IntakeSessionRecord],
+    pub activity: &'a [ActivityEventRecord],
     pub orchestrator_status: &'a str,
     pub runner_status: &'a str,
     pub qa_status: &'a str,
@@ -24,21 +27,42 @@ pub struct DashboardView<'a> {
 
 pub struct BoardView<'a> {
     pub tasks: &'a [TaskRecord],
+    pub active_runs: &'a [StageRunRecord],
+    pub activity: &'a [ActivityEventRecord],
 }
 
 pub struct TaskListView<'a> {
     pub tasks: &'a [TaskRecord],
+    pub active_runs: &'a [StageRunRecord],
+    pub activity: &'a [ActivityEventRecord],
 }
 
 pub struct RunsView<'a> {
     pub tasks: &'a [TaskRecord],
+    pub active_runs: &'a [StageRunRecord],
     pub runs: &'a [StageRunRecord],
+    pub activity: &'a [ActivityEventRecord],
+}
+
+pub struct IntakeIndexView<'a> {
+    pub sessions: &'a [IntakeSessionRecord],
+    pub activity: &'a [ActivityEventRecord],
+}
+
+pub struct IntakeDetailView<'a> {
+    pub session: &'a IntakeSessionRecord,
+    pub messages: &'a [IntakeMessageRecord],
+    pub activity: &'a [ActivityEventRecord],
 }
 
 pub struct TaskDetailView<'a> {
     pub task: &'a TaskRecord,
+    pub queued_stage: Option<&'a str>,
+    pub active_runs: &'a [StageRunRecord],
+    pub activity: &'a [ActivityEventRecord],
     pub transitions: &'a [StateTransitionRecord],
     pub stage_runs: &'a [StageRunRecord],
+    pub live_log: Option<&'a str>,
     pub artifacts: &'a [WorkingArtifactRecord],
     pub human_actions: &'a [HumanActionRecord],
     pub qa_report: Option<&'a str>,
@@ -211,21 +235,7 @@ pub fn render_dashboard(view: DashboardView<'_>) -> String {
         blocked + awaiting_human
     );
 
-    let intake = "<section class=\"panel intake-panel\">\
-            <div class=\"panel-header\">\
-              <div><p class=\"eyebrow\">New Work</p><h2>Create Task</h2></div>\
-              <p class=\"section-copy\">Start from a free-form goal. Patron will convert it into a structured delivery pipeline.</p>\
-            </div>\
-            <form action=\"/tasks\" method=\"post\" class=\"intake-form\">\
-              <label for=\"goal\">Goal</label>\
-              <textarea id=\"goal\" name=\"goal\" rows=\"8\" placeholder=\"Describe the outcome you want and any constraints that matter.\"></textarea>\
-              <div class=\"form-footer\">\
-                <p>Planning begins immediately in v1; plan approval is not required by default.</p>\
-                <button class=\"button primary\" type=\"submit\">Create Draft Task</button>\
-              </div>\
-            </form>\
-          </section>"
-        .to_string();
+    let intake = render_intake_launcher(view.intake_sessions);
 
     let attention = format!(
         "<section class=\"panel attention-grid\">\
@@ -247,6 +257,7 @@ pub fn render_dashboard(view: DashboardView<'_>) -> String {
     );
 
     let recent_activity = render_recent_runs_panel(view.recent_runs, view.tasks, 8);
+    let event_feed = render_event_feed(view.activity, "Harness Activity", 10);
     let system = system_status_panel(
         view.bootstrap,
         view.runtime_root.display().to_string(),
@@ -265,15 +276,22 @@ pub fn render_dashboard(view: DashboardView<'_>) -> String {
         "dashboard",
         "Dashboard",
         &format!(
-            "{}<div class=\"dashboard-grid\">\
+            "{}{}<div class=\"dashboard-grid\">\
                <div class=\"dashboard-main\">{}{}\
                </div>\
-               <aside class=\"dashboard-side\">{}{}<section class=\"panel\"><div class=\"panel-header\"><div><p class=\"eyebrow\">Pipeline</p><h2>Current Stages</h2></div></div><ol class=\"plain-list\">{}</ol></section>\
+               <aside class=\"dashboard-side\">{}{}{}<section class=\"panel\"><div class=\"panel-header\"><div><p class=\"eyebrow\">Pipeline</p><h2>Current Stages</h2></div></div><ol class=\"plain-list\">{}</ol></section>\
                </aside>\
              </div>",
-            hero, intake, attention, recent_activity, system, pipeline
+            hero,
+            render_active_runs_strip(view.active_runs, view.tasks),
+            intake,
+            attention,
+            recent_activity,
+            system,
+            event_feed,
+            pipeline
         ),
-        "",
+        &page_refresh_script(!view.active_runs.is_empty()),
     )
 }
 
@@ -284,21 +302,34 @@ pub fn render_board(view: BoardView<'_>) -> String {
             <div><p class=\"eyebrow\">Workflow</p><h1>Board</h1></div>\
             <p class=\"section-copy\">Drag cards to reorder within each lane. Workflow state changes remain explicit and button-driven so the orchestration stays deterministic.</p>\
          </section>\
+         {}\
          <section class=\"board-toolbar\">\
             <div class=\"toolbar-chip\">Blocked: {}</div>\
             <div class=\"toolbar-chip\">Awaiting Human: {}</div>\
             <div class=\"toolbar-chip\">Ready For QA: {}</div>\
             <div class=\"toolbar-chip\">Ready For PR: {}</div>\
          </section>\
+         {}\
          <section id=\"task-board\" class=\"board-page\">{}</section>",
+        render_active_runs_strip(view.active_runs, view.tasks),
         count_state(view.tasks, "blocked"),
         count_state(view.tasks, "awaiting_human"),
         count_state(view.tasks, "ready_for_qa"),
         count_state(view.tasks, "ready_for_pr"),
+        render_event_feed(view.activity, "Live Harness Feed", 8),
         board
     );
 
-    app_shell("board", "Board", &body, &board_drag_script())
+    app_shell(
+        "board",
+        "Board",
+        &body,
+        &format!(
+            "{}{}",
+            page_refresh_script(!view.active_runs.is_empty()),
+            board_drag_script()
+        ),
+    )
 }
 
 pub fn render_tasks_index(view: TaskListView<'_>) -> String {
@@ -331,21 +362,30 @@ pub fn render_tasks_index(view: TaskListView<'_>) -> String {
             <div><p class=\"eyebrow\">Tasks</p><h1>Task Explorer</h1></div>\
             <p class=\"section-copy\">Browse tasks by urgency and jump straight into the detail page when you need the full story.</p>\
          </section>\
+         {}\
          <section class=\"panel list-panel\">\
            <div class=\"panel-header\"><div><h2>Needs Attention</h2></div><span class=\"count-pill\">{}</span></div>\
            <div class=\"task-grid\">{}</div>\
          </section>\
+         {}\
          <section class=\"panel list-panel\">\
            <div class=\"panel-header\"><div><h2>Everything Else</h2></div><span class=\"count-pill\">{}</span></div>\
            <div class=\"task-grid\">{}</div>\
          </section>",
+        render_active_runs_strip(view.active_runs, view.tasks),
         spotlight.len(),
         render_task_grid(&spotlight, true),
+        render_event_feed(view.activity, "Recent Events", 8),
         backlog.len(),
         render_task_grid(&backlog, false)
     );
 
-    app_shell("tasks", "Tasks", &body, "")
+    app_shell(
+        "tasks",
+        "Tasks",
+        &body,
+        &page_refresh_script(!view.active_runs.is_empty()),
+    )
 }
 
 pub fn render_runs(view: RunsView<'_>) -> String {
@@ -404,11 +444,148 @@ pub fn render_runs(view: RunsView<'_>) -> String {
             <div><p class=\"eyebrow\">Execution</p><h1>Runs</h1></div>\
             <p class=\"section-copy\">A global feed of runner activity across planning, development, review, QA, recovery, and PR preparation.</p>\
          </section>\
+         {}\
+         {}\
          <section class=\"run-grid\">{}</section>",
+        render_active_runs_strip(view.active_runs, view.tasks),
+        render_event_feed(view.activity, "Recent Events", 8),
         timeline
     );
 
-    app_shell("runs", "Runs", &body, "")
+    app_shell(
+        "runs",
+        "Runs",
+        &body,
+        &page_refresh_script(!view.active_runs.is_empty()),
+    )
+}
+
+pub fn render_intake_index(view: IntakeIndexView<'_>) -> String {
+    let sessions = if view.sessions.is_empty() {
+        "<div class=\"empty-state\">No intake sessions yet. Start with a delivery goal and let the orchestrator shape it into a real task draft.</div>".to_string()
+    } else {
+        view.sessions
+            .iter()
+            .map(render_intake_session_card)
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let body = format!(
+        "<section class=\"page-header\">\
+            <div><p class=\"eyebrow\">Orchestrator</p><h1>Task-Definition Console</h1></div>\
+            <p class=\"section-copy\">Define work conversationally, let Patron ask for missing constraints, and approve a structured draft before it enters the task pipeline.</p>\
+         </section>\
+         <section class=\"panel intake-console\">\
+           <div class=\"panel-header\">\
+             <div><h2>Start a new task definition</h2></div>\
+             <p class=\"section-copy\">Describe the outcome. Patron will ask follow-up questions only when the intake is too vague to become a trustworthy task draft.</p>\
+           </div>\
+           <form action=\"/intake\" method=\"post\" class=\"chat-composer\">\
+             <label for=\"intake-goal\">Goal</label>\
+             <textarea id=\"intake-goal\" name=\"goal\" rows=\"6\" placeholder=\"Describe the desired outcome, key constraints, and any important QA expectations.\"></textarea>\
+             <div class=\"form-footer\">\
+               <p>This is an intake conversation for the harness, not a free-form chatbot.</p>\
+               <button class=\"button primary\" type=\"submit\">Start Orchestrator Intake</button>\
+             </div>\
+           </form>\
+         </section>\
+         <div class=\"dashboard-grid\">\
+           <div class=\"dashboard-main\">\
+             <section class=\"panel list-panel\">\
+               <div class=\"panel-header\"><div><h2>Recent Intake Sessions</h2></div><span class=\"count-pill\">{}</span></div>\
+               <div class=\"task-grid\">{}</div>\
+             </section>\
+           </div>\
+           <aside class=\"dashboard-side\">{}\
+           </aside>\
+         </div>",
+        view.sessions.len(),
+        sessions,
+        render_event_feed(view.activity, "Harness Activity", 12)
+    );
+
+    app_shell("intake", "Intake", &body, "")
+}
+
+pub fn render_intake_detail(view: IntakeDetailView<'_>) -> String {
+    let messages = if view.messages.is_empty() {
+        "<div class=\"empty-state\">No intake messages yet.</div>".to_string()
+    } else {
+        view.messages
+            .iter()
+            .map(render_chat_message)
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let draft_panel = render_intake_draft_panel(view.session);
+    let reply_form = if view.session.status == "task_created" {
+        "<div class=\"panel success-panel\"><p class=\"section-copy\">This intake session has already been approved into a task. Continue from the task page.</p></div>".to_string()
+    } else {
+        format!(
+            "<section class=\"panel\">\
+               <div class=\"panel-header\"><div><h2>{}</h2></div></div>\
+               <form action=\"/intake/{}/reply\" method=\"post\" class=\"chat-composer\">\
+                 <label for=\"intake-reply\">Reply</label>\
+                 <textarea id=\"intake-reply\" name=\"message\" rows=\"5\" placeholder=\"Answer the orchestrator or refine the draft with more context.\"></textarea>\
+                 <div class=\"form-footer\">\
+                   <p>Patron will either ask one more focused question or refresh the draft.</p>\
+                   <button class=\"button secondary\" type=\"submit\">Send Reply</button>\
+                 </div>\
+               </form>\
+             </section>",
+            if view.session.status == "draft_ready" {
+                "Refine the draft"
+            } else {
+                "Continue the intake"
+            },
+            view.session.id
+        )
+    };
+    let body = format!(
+        "<section class=\"page-header detail-header\">\
+            <div>\
+              <p class=\"eyebrow\">Orchestrator Intake</p>\
+              <h1>{}</h1>\
+              <p class=\"task-meta\"><code>{}</code> <span class=\"status-badge status-{}\">{}</span></p>\
+              <p class=\"section-copy\">Goal: {}</p>\
+            </div>\
+            <aside class=\"detail-actions\">\
+              <div class=\"meta-stack\">\
+                <span class=\"meta-label\">Created</span><code>{}</code>\
+              </div>\
+              <a class=\"button secondary\" href=\"/intake\">Back to Intake Queue</a>\
+            </aside>\
+         </section>\
+         <div class=\"dashboard-grid\">\
+           <div class=\"dashboard-main\">\
+             <section class=\"panel conversation-panel\">\
+               <div class=\"panel-header\"><div><h2>Conversation</h2></div></div>\
+               <div class=\"chat-thread\">{}</div>\
+             </section>\
+             {}\
+             {}\
+           </div>\
+           <aside class=\"dashboard-side\">{}\
+           </aside>\
+         </div>",
+        html_escape(
+            view.session
+                .draft_title
+                .as_deref()
+                .unwrap_or("Task Definition")
+        ),
+        view.session.id,
+        css_state(&view.session.status),
+        human_label(&view.session.status),
+        html_escape(&view.session.initial_goal),
+        html_escape(&view.session.created_at),
+        messages,
+        reply_form,
+        draft_panel,
+        render_event_feed(view.activity, "Harness Activity", 12)
+    );
+
+    app_shell("intake", "Intake Detail", &body, "")
 }
 
 pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
@@ -419,6 +596,13 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
     } else {
         action_html
     };
+    let next_step = render_next_step_panel(view.task, &actions);
+    let queued_banner = view
+        .queued_stage
+        .map(render_queued_banner)
+        .unwrap_or_default();
+    let active_runs_banner =
+        render_active_runs_strip(view.active_runs, std::slice::from_ref(view.task));
     let tab_nav = [
         ("overview", "Overview"),
         ("evidence", "QA Evidence"),
@@ -463,6 +647,10 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
     let transitions = render_transitions(view.transitions);
     let stage_runs = render_stage_runs(view.stage_runs);
     let artifacts = render_artifact_links(view.task.id.as_str(), view.artifacts);
+    let activity = render_event_feed(view.activity, "Task Activity", 10);
+    let live_log = view.live_log.map(render_preformatted).unwrap_or_else(|| {
+        "<p class=\"empty-inline\">No live runner log is available yet.</p>".to_string()
+    });
     let qa_report = view.qa_report.map(render_preformatted).unwrap_or_else(|| {
         "<p class=\"empty-inline\">No QA report has been generated yet.</p>".to_string()
     });
@@ -507,12 +695,19 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
               <div class=\"action-stack\">{}</div>\
             </aside>\
          </section>\
+         {}\
+         {}\
+         {}\
          <section class=\"tab-bar\">{}</section>\
          <section class=\"tab-panel active\" data-tab-panel=\"overview\">\
            <div class=\"detail-grid\">\
              <div class=\"panel\">\
                <div class=\"panel-header\"><div><h2>Current Handoff</h2></div></div>\
                <ul class=\"plain-list\">{}</ul>\
+             </div>\
+             <div class=\"panel\">\
+               <div class=\"panel-header\"><div><h2>Live Runner Log</h2></div></div>\
+               {}\
              </div>\
              <div class=\"panel\">\
                <div class=\"panel-header\"><div><h2>Review</h2></div></div>\
@@ -558,7 +753,8 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
                <ul class=\"plain-list\">{}</ul>\
              </div>\
            </div>\
-         </section>",
+         </section>\
+         {}",
         html_escape(&view.task.title),
         view.task.id,
         css_state(&view.task.state),
@@ -575,8 +771,12 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
         html_escape(&view.task.workspace_path),
         render_blocked_reason(view.task),
         actions,
+        queued_banner,
+        next_step,
+        active_runs_banner,
         tab_nav,
         human_actions,
+        live_log,
         review_report,
         pr_summary,
         qa_report,
@@ -587,10 +787,261 @@ pub fn render_task_detail(view: TaskDetailView<'_>) -> String {
         qa_log,
         artifacts,
         transitions,
-        stage_runs
+        stage_runs,
+        activity
     );
 
-    app_shell("tasks", &view.task.title, &body, &task_tabs_script())
+    app_shell(
+        "tasks",
+        &view.task.title,
+        &body,
+        &task_tabs_script(view.task, view.queued_stage),
+    )
+}
+
+fn render_next_step_panel(task: &TaskRecord, actions: &str) -> String {
+    let (title, copy) = next_step_copy(task);
+    format!(
+        "<section class=\"panel next-step-panel\">\
+           <div class=\"panel-header\">\
+             <div>\
+               <p class=\"eyebrow\">Next Step</p>\
+               <h2>{}</h2>\
+             </div>\
+             <span class=\"status-badge status-{}\">{}</span>\
+           </div>\
+           <p class=\"section-copy\">{}</p>\
+           <div class=\"action-stack next-step-actions\">{}</div>\
+         </section>",
+        html_escape(title),
+        css_state(&task.state),
+        human_label(&task.state),
+        html_escape(copy),
+        actions
+    )
+}
+
+fn render_intake_launcher(sessions: &[IntakeSessionRecord]) -> String {
+    let latest = sessions.first().map(render_intake_session_mini).unwrap_or_else(|| {
+        "<p class=\"section-copy\">No intake sessions yet. Start the first one from the orchestrator console.</p>".to_string()
+    });
+    format!(
+        "<section class=\"panel intake-panel\">\
+           <div class=\"panel-header\">\
+             <div><p class=\"eyebrow\">New Work</p><h2>Open Orchestrator Console</h2></div>\
+             <p class=\"section-copy\">Task definition now happens in a dedicated harness console with follow-up questions and an approval step before task creation.</p>\
+           </div>\
+           <div class=\"intake-launcher\">{}\
+             <div class=\"hero-actions\">\
+               <a class=\"button primary\" href=\"/intake\">Define New Work</a>\
+               <a class=\"button secondary\" href=\"/intake\">Review Intake Queue</a>\
+             </div>\
+           </div>\
+         </section>",
+        latest
+    )
+}
+
+fn render_intake_session_mini(session: &IntakeSessionRecord) -> String {
+    format!(
+        "<article class=\"mini-session status-{}\">\
+           <p class=\"eyebrow\">Latest Intake</p>\
+           <h3><a href=\"/intake/{}\">{}</a></h3>\
+           <p class=\"section-copy\">{}</p>\
+         </article>",
+        css_state(&session.status),
+        session.id,
+        html_escape(
+            session
+                .draft_title
+                .as_deref()
+                .unwrap_or(&session.initial_goal)
+        ),
+        html_escape(&session.status)
+    )
+}
+
+fn render_intake_session_card(session: &IntakeSessionRecord) -> String {
+    format!(
+        "<article class=\"task-card task-card-link status-{}\">\
+           <div class=\"task-card-head\">\
+             <div><p class=\"eyebrow\">{}</p><h3><a href=\"/intake/{}\">{}</a></h3></div>\
+             <span class=\"status-badge status-{}\">{}</span>\
+           </div>\
+           <p>{}</p>\
+         </article>",
+        css_state(&session.status),
+        html_escape(&session.id),
+        session.id,
+        html_escape(session.draft_title.as_deref().unwrap_or("Untitled intake")),
+        css_state(&session.status),
+        human_label(&session.status),
+        html_escape(&session.initial_goal)
+    )
+}
+
+fn render_chat_message(message: &IntakeMessageRecord) -> String {
+    format!(
+        "<article class=\"chat-bubble chat-{}\">\
+           <div class=\"chat-meta\">\
+             <strong>{}</strong>\
+             <span>{}</span>\
+           </div>\
+           <div class=\"chat-body\">{}</div>\
+         </article>",
+        css_state(&message.author_kind),
+        html_escape(&message.author_kind),
+        html_escape(&message.created_at),
+        render_markdownish(&message.body)
+    )
+}
+
+fn render_intake_draft_panel(session: &IntakeSessionRecord) -> String {
+    let Some(draft) = session.draft_markdown.as_deref() else {
+        return "<section class=\"panel\"><div class=\"panel-header\"><div><h2>Draft</h2></div></div><p class=\"empty-inline\">Patron is still gathering enough detail to produce a structured draft.</p></section>".to_string();
+    };
+    let approve = if session.status == "draft_ready" {
+        format!(
+            "<form action=\"/intake/{}/approve\" method=\"post\" class=\"inline-form\">\
+               <button class=\"button primary\" type=\"submit\">Approve and Create Task</button>\
+             </form>",
+            session.id
+        )
+    } else {
+        session
+            .task_id
+            .as_deref()
+            .map(|task_id| {
+                format!(
+                    "<a class=\"button primary\" href=\"/tasks/{}\">Open Created Task</a>",
+                    task_id
+                )
+            })
+            .unwrap_or_default()
+    };
+    format!(
+        "<section class=\"panel\">\
+           <div class=\"panel-header\">\
+             <div><h2>Draft Task Package</h2></div>\
+             {}\
+           </div>\
+           {}\
+         </section>",
+        approve,
+        render_preformatted(draft)
+    )
+}
+
+fn render_event_feed(events: &[ActivityEventRecord], title: &str, limit: usize) -> String {
+    let items = if events.is_empty() {
+        "<li>No activity recorded yet.</li>".to_string()
+    } else {
+        events
+            .iter()
+            .take(limit)
+            .map(|event| {
+                let target = event
+                    .task_id
+                    .as_deref()
+                    .map(|task_id| format!(" <a href=\"/tasks/{task_id}\">open task</a>"))
+                    .unwrap_or_default();
+                format!(
+                    "<li><strong>{}</strong><br><small>{} • {}{}{}</small></li>",
+                    html_escape(&event.headline),
+                    html_escape(&event.scope_kind),
+                    html_escape(&event.created_at),
+                    event
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" • {}", html_escape(detail)))
+                        .unwrap_or_default(),
+                    target
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    format!(
+        "<section class=\"panel\">\
+           <div class=\"panel-header\"><div><p class=\"eyebrow\">Live Feed</p><h2>{}</h2></div></div>\
+           <ul class=\"plain-list activity-feed\">{}</ul>\
+         </section>",
+        html_escape(title),
+        items
+    )
+}
+
+fn render_queued_banner(stage: &str) -> String {
+    format!(
+        "<section class=\"panel queued-banner\">\
+           <div class=\"panel-header\">\
+             <div>\
+               <p class=\"eyebrow\">Queued</p>\
+               <h2>{}</h2>\
+             </div>\
+             <span class=\"status-badge status-planning\">working</span>\
+           </div>\
+           <p class=\"section-copy\">Patron accepted this request and started it in the background. This page will refresh automatically while the task updates.</p>\
+         </section>",
+        html_escape(&format!("{} stage queued", human_label(stage)))
+    )
+}
+
+fn next_step_copy(task: &TaskRecord) -> (&'static str, &'static str) {
+    match task.state.as_str() {
+        "draft" | "ready_for_planning" => (
+            "Run planning to turn this goal into a structured task package",
+            "This is the normal first action after creating a task. Planning generates task.md, plan.md, and qa-steps.md so the rest of the pipeline has real inputs.",
+        ),
+        "planning" => (
+            "Planning is in progress",
+            "Wait for the planning stage to finish. When it completes, development becomes the next available action.",
+        ),
+        "ready_for_development" => (
+            "Run development from the planning artifacts",
+            "Development should consume the planning package rather than rely on loose context. When it completes, review becomes available.",
+        ),
+        "developing" => (
+            "Development is in progress",
+            "Wait for development to finish. The next step will be review.",
+        ),
+        "ready_for_review" => (
+            "Run review to decide whether this task is ready for QA",
+            "Review checks the current task package and routes the task either forward to QA or back into a fix loop.",
+        ),
+        "reviewing" => (
+            "Review is in progress",
+            "Wait for the review stage to finish. It will either unlock QA or send the task back for fixes.",
+        ),
+        "ready_for_qa" => (
+            "Run QA to verify behavior and capture evidence",
+            "QA executes the planned scenarios and records screenshots, traces, and logs before the task moves toward PR handoff.",
+        ),
+        "qa_running" => (
+            "QA is in progress",
+            "Wait for QA to finish. This stage decides whether the task is ready for PR prep or needs a fix loop.",
+        ),
+        "fix_required" => (
+            "Run the fix loop and return to development",
+            "A prior stage found issues. The fix loop records that context and sends the task back into development.",
+        ),
+        "ready_for_pr" => (
+            "Prepare the PR handoff",
+            "This packages the current task outputs into a PR-ready summary for human review.",
+        ),
+        "awaiting_human" => (
+            "Human review is required",
+            "Automation has reached an approval boundary. Review the handoff and decide whether to merge, change, or continue manually.",
+        ),
+        "blocked" => (
+            "Resolve the blocker before continuing",
+            "This task is paused because Patron could not safely continue on its own.",
+        ),
+        _ => (
+            "Inspect the task details to decide the next action",
+            "This task is not in a common automated handoff state, so inspect its artifacts and history before continuing.",
+        ),
+    }
 }
 
 fn app_shell(active: &str, title: &str, body: &str, page_script: &str) -> String {
@@ -1060,6 +1511,57 @@ fn base_styles() -> &'static str {
       border-radius: 18px;
       background: rgba(255,255,255,0.58);
     }
+    .chat-thread { display: grid; gap: 14px; }
+    .chat-bubble {
+      display: grid;
+      gap: 10px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.75);
+    }
+    .chat-user {
+      background: linear-gradient(180deg, #fff4e8, #fffdf8);
+      border-color: #e2c8a7;
+    }
+    .chat-orchestrator,
+    .chat-system {
+      background: linear-gradient(180deg, #f5f1ff, #fffdf8);
+      border-color: #d4caef;
+    }
+    .chat-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .chat-body p { margin: 0; line-height: 1.55; }
+    .chat-body { display: grid; gap: 10px; }
+    .chat-composer { display: grid; gap: 12px; }
+    .chat-composer textarea {
+      width: 100%;
+      min-height: 140px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      padding: 16px;
+      font: inherit;
+      background: rgba(255,255,255,0.8);
+      resize: vertical;
+    }
+    .intake-launcher,
+    .intake-console,
+    .conversation-panel { display: grid; gap: 16px; }
+    .mini-session {
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.64);
+    }
+    .mini-session h3 { margin: 0; font-size: 1rem; }
+    .activity-feed li { line-height: 1.5; }
+    .inline-form { margin: 0; }
     @media (max-width: 1080px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar {
@@ -1086,6 +1588,7 @@ fn nav_links(active: &str) -> String {
     let items = [
         ("setup", "/setup", "Setup"),
         ("dashboard", "/", "Dashboard"),
+        ("intake", "/intake", "Intake"),
         ("board", "/board", "Board"),
         ("tasks", "/tasks", "Tasks"),
         ("runs", "/runs", "Runs"),
@@ -1314,6 +1817,59 @@ fn render_recent_runs_panel(runs: &[StageRunRecord], tasks: &[TaskRecord], limit
         } else {
             items
         }
+    )
+}
+
+fn render_active_runs_strip(runs: &[StageRunRecord], tasks: &[TaskRecord]) -> String {
+    if runs.is_empty() {
+        return String::new();
+    }
+
+    let titles = task_title_map(tasks);
+    let items = runs
+        .iter()
+        .take(6)
+        .map(|run| {
+            let title = titles
+                .get(&run.task_id)
+                .cloned()
+                .unwrap_or_else(|| run.task_id.clone());
+            format!(
+                "<li><strong>{}</strong> on <a href=\"/tasks/{}\">{}</a><br><small><code>{}</code> • attempt {}</small></li>",
+                html_escape(&human_label(&run.stage)),
+                run.task_id,
+                html_escape(&title),
+                html_escape(&run.id),
+                run.attempt_number
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!(
+        "<section class=\"panel active-work-panel\">\
+           <div class=\"panel-header\">\
+             <div><p class=\"eyebrow\">Active Work</p><h2>Patron Is Working</h2></div>\
+             <span class=\"status-badge status-planning\">{} running</span>\
+           </div>\
+           <p class=\"section-copy\">You can keep using the UI while these stages run. This page refreshes automatically while work is active.</p>\
+           <ul class=\"plain-list\">{}</ul>\
+         </section>",
+        runs.len(),
+        items
+    )
+}
+
+fn page_refresh_script(should_refresh: bool) -> String {
+    format!(
+        r#"
+      (() => {{
+        if ({}) {{
+          window.setTimeout(() => window.location.reload(), 2200);
+        }}
+      }})();
+    "#,
+        if should_refresh { "true" } else { "false" }
     )
 }
 
@@ -1572,51 +2128,61 @@ fn board_drag_script() -> String {
     .to_string()
 }
 
-fn task_tabs_script() -> String {
-    r#"
-      (() => {
+fn task_tabs_script(task: &TaskRecord, queued_stage: Option<&str>) -> String {
+    let should_refresh = queued_stage.is_some()
+        || matches!(
+            task.state.as_str(),
+            "planning" | "developing" | "reviewing" | "qa_running"
+        );
+    format!(
+        r#"
+      (() => {{
         const triggers = [...document.querySelectorAll("[data-tab-target]")];
         const panels = [...document.querySelectorAll("[data-tab-panel]")];
-        const activate = (target) => {
-          triggers.forEach((trigger) => {
+        const activate = (target) => {{
+          triggers.forEach((trigger) => {{
             trigger.classList.toggle("active", trigger.dataset.tabTarget === target);
-          });
-          panels.forEach((panel) => {
+          }});
+          panels.forEach((panel) => {{
             panel.classList.toggle("active", panel.dataset.tabPanel === target);
-          });
-        };
-        triggers.forEach((trigger) => {
+          }});
+        }};
+        triggers.forEach((trigger) => {{
           trigger.addEventListener("click", () => activate(trigger.dataset.tabTarget));
-        });
-      })();
-    "#
-    .to_string()
+        }});
+        if ({}) {{
+          window.setTimeout(() => window.location.replace(window.location.pathname), 2200);
+        }}
+      }})();
+    "#,
+        if should_refresh { "true" } else { "false" }
+    )
 }
 
 fn task_action_buttons(task: &TaskRecord) -> String {
     match task.state.as_str() {
         "draft" | "ready_for_planning" => format!(
-            "<form action=\"/tasks/{}/plan\" method=\"post\"><button type=\"submit\">Run planning</button></form>",
+            "<form action=\"/tasks/{}/plan\" method=\"post\" data-busy-label=\"Running Planning...\" data-busy-copy=\"Patron is generating task.md, plan.md, and qa-steps.md for this task.\"><button type=\"submit\">Run Planning Now</button></form>",
             task.id
         ),
         "ready_for_development" => format!(
-            "<form action=\"/tasks/{}/develop\" method=\"post\"><button type=\"submit\">Run development</button></form>",
+            "<form action=\"/tasks/{}/develop\" method=\"post\" data-busy-label=\"Starting Development...\" data-busy-copy=\"Patron is entering the development stage for this task.\"><button type=\"submit\">Start Development</button></form>",
             task.id
         ),
         "ready_for_review" => format!(
-            "<form action=\"/tasks/{}/review\" method=\"post\"><button type=\"submit\">Run review</button></form>",
+            "<form action=\"/tasks/{}/review\" method=\"post\" data-busy-label=\"Running Review...\" data-busy-copy=\"Patron is reviewing the current task package and deciding the next route.\"><button type=\"submit\">Run Review</button></form>",
             task.id
         ),
         "ready_for_qa" => format!(
-            "<form action=\"/tasks/{}/qa\" method=\"post\"><button type=\"submit\">Run QA</button></form>",
+            "<form action=\"/tasks/{}/qa\" method=\"post\" data-busy-label=\"Running QA...\" data-busy-copy=\"Patron is executing QA scenarios and capturing evidence for this task.\"><button type=\"submit\">Run QA Checks</button></form>",
             task.id
         ),
         "ready_for_pr" => format!(
-            "<form action=\"/tasks/{}/prepare-pr\" method=\"post\"><button type=\"submit\">Prepare PR Handoff</button></form>",
+            "<form action=\"/tasks/{}/prepare-pr\" method=\"post\" data-busy-label=\"Preparing PR Handoff...\" data-busy-copy=\"Patron is generating the PR summary and human handoff package.\"><button type=\"submit\">Prepare PR Handoff</button></form>",
             task.id
         ),
         "fix_required" => format!(
-            "<form action=\"/tasks/{}/fix\" method=\"post\"><button type=\"submit\">Run fix loop</button></form>",
+            "<form action=\"/tasks/{}/fix\" method=\"post\" data-busy-label=\"Starting Fix Loop...\" data-busy-copy=\"Patron is recording the failure context and routing this task back into development.\"><button type=\"submit\">Start Fix Loop</button></form>",
             task.id
         ),
         _ => String::new(),
@@ -1668,6 +2234,14 @@ fn task_title_map(tasks: &[TaskRecord]) -> HashMap<String, String> {
 
 fn render_preformatted(value: &str) -> String {
     format!("<pre>{}</pre>", html_escape(value))
+}
+
+fn render_markdownish(value: &str) -> String {
+    value
+        .split("\n\n")
+        .map(|block| format!("<p>{}</p>", html_escape(block).replace('\n', "<br>")))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn render_blocked_reason(task: &TaskRecord) -> String {

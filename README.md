@@ -27,8 +27,9 @@ Patron is currently a working local prototype with:
 
 - explicit runtime initialization
 - repository-aware startup checks
-- a local Axum UI with dashboard, board, tasks, runs, and detail pages
+- a local Axum UI with dashboard, orchestrator intake, board, tasks, runs, and detail pages
 - SQLite-backed task, run, transition, artifact, and human-action state
+- persistent orchestrator intake sessions, follow-up prompts, draft approval, and activity events
 - planning, development, review, QA, fix-loop, and PR-preparation stages
 - a built-in sample app route for dogfooding
 
@@ -46,6 +47,14 @@ It is not yet a general-purpose autonomous code delivery system for arbitrary re
 ## Getting Started
 
 Run Patron from the root of a git repository.
+
+If this is a brand new project directory, run:
+
+```bash
+git init
+```
+
+before `patron init`.
 
 ### 1. Install Patron
 
@@ -100,13 +109,13 @@ http://127.0.0.1:3000/sample-app
 
 This tiny app is the recommended first target for dogfooding Patron’s task and QA flow.
 
-### 5. Create a Sample Task
+### 5. Define a Sample Task
 
 Use one of the goals from:
 
 - [Sample App Task Pack](/Users/malazay/dev/patron/docs/testing/sample-app-task-pack.md)
 
-Then move it through the visible pipeline inside Patron.
+Open `/intake`, define the work through the orchestrator console, approve the draft, and then move the resulting task through the visible pipeline inside Patron.
 
 ## Runtime Model
 

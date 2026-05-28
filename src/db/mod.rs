@@ -55,6 +55,40 @@ pub struct TaskRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntakeSessionRecord {
+    pub id: String,
+    pub status: String,
+    pub initial_goal: String,
+    pub draft_title: Option<String>,
+    pub draft_markdown: Option<String>,
+    pub task_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntakeMessageRecord {
+    pub id: i64,
+    pub session_id: String,
+    pub author_kind: String,
+    pub message_kind: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivityEventRecord {
+    pub id: i64,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub task_id: Option<String>,
+    pub event_kind: String,
+    pub headline: String,
+    pub detail: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StageRunRecord {
     pub id: String,
     pub task_id: String,
@@ -123,6 +157,22 @@ pub struct WorkingArtifactUpsert<'a> {
     pub media_type: &'a str,
     pub required_for_stage: bool,
     pub stage_run_id: Option<&'a str>,
+}
+
+pub struct IntakeSessionUpdate<'a> {
+    pub status: &'a str,
+    pub draft_title: Option<&'a str>,
+    pub draft_markdown: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+}
+
+pub struct ActivityEventCreate<'a> {
+    pub scope_kind: &'a str,
+    pub scope_id: &'a str,
+    pub task_id: Option<&'a str>,
+    pub event_kind: &'a str,
+    pub headline: &'a str,
+    pub detail: Option<&'a str>,
 }
 
 pub fn initialize(runtime: &RuntimePaths) -> Result<(), String> {
@@ -253,6 +303,222 @@ pub fn next_task_id(runtime: &RuntimePaths) -> Result<String, String> {
     Ok(format!("TASK-{next_number:04}"))
 }
 
+pub fn next_intake_session_id(runtime: &RuntimePaths) -> Result<String, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare("SELECT id FROM intake_sessions ORDER BY id DESC LIMIT 1")
+        .map_err(|error| format!("failed to prepare intake id query: {error}"))?;
+
+    let latest_id = statement
+        .query_row([], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|error| format!("failed to fetch last intake id: {error}"))?;
+
+    let next_number = latest_id
+        .as_deref()
+        .and_then(|value| value.strip_prefix("INTAKE-"))
+        .and_then(|value| value.parse::<u32>().ok())
+        .map_or(1, |number| number + 1);
+
+    Ok(format!("INTAKE-{next_number:04}"))
+}
+
+pub fn create_intake_session(
+    runtime: &RuntimePaths,
+    initial_goal: &str,
+) -> Result<IntakeSessionRecord, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let session = IntakeSessionRecord {
+        id: next_intake_session_id(runtime)?,
+        status: "awaiting_input".into(),
+        initial_goal: initial_goal.to_string(),
+        draft_title: None,
+        draft_markdown: None,
+        task_id: None,
+        created_at: timestamp_now(),
+        updated_at: timestamp_now(),
+    };
+
+    connection
+        .execute(
+            "INSERT INTO intake_sessions (
+                id, status, initial_goal, draft_title, draft_markdown, task_id, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5)",
+            params![
+                session.id,
+                session.status,
+                session.initial_goal,
+                session.created_at,
+                session.updated_at
+            ],
+        )
+        .map_err(|error| format!("failed to create intake session {}: {error}", session.id))?;
+
+    record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "intake",
+            scope_id: &session.id,
+            task_id: None,
+            event_kind: "intake_started",
+            headline: "Orchestrator intake started",
+            detail: Some(&session.initial_goal),
+        },
+    )?;
+
+    Ok(session)
+}
+
+pub fn get_intake_session(
+    runtime: &RuntimePaths,
+    session_id: &str,
+) -> Result<Option<IntakeSessionRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, status, initial_goal, draft_title, draft_markdown, task_id, created_at, updated_at
+             FROM intake_sessions
+             WHERE id = ?1",
+        )
+        .map_err(|error| format!("failed to prepare intake session lookup: {error}"))?;
+
+    statement
+        .query_row([session_id], |row| {
+            Ok(IntakeSessionRecord {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                initial_goal: row.get(2)?,
+                draft_title: row.get(3)?,
+                draft_markdown: row.get(4)?,
+                task_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .optional()
+        .map_err(|error| format!("failed to load intake session {session_id}: {error}"))
+}
+
+pub fn list_intake_sessions(
+    runtime: &RuntimePaths,
+    limit: usize,
+) -> Result<Vec<IntakeSessionRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, status, initial_goal, draft_title, draft_markdown, task_id, created_at, updated_at
+             FROM intake_sessions
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?1",
+        )
+        .map_err(|error| format!("failed to prepare intake session listing query: {error}"))?;
+
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok(IntakeSessionRecord {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                initial_goal: row.get(2)?,
+                draft_title: row.get(3)?,
+                draft_markdown: row.get(4)?,
+                task_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| format!("failed to query intake sessions: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode intake sessions: {error}"))
+}
+
+pub fn update_intake_session(
+    runtime: &RuntimePaths,
+    session_id: &str,
+    update: IntakeSessionUpdate<'_>,
+) -> Result<(), String> {
+    let connection = open_connection(&runtime.state_db)?;
+    connection
+        .execute(
+            "UPDATE intake_sessions
+             SET status = ?2,
+                 draft_title = ?3,
+                 draft_markdown = ?4,
+                 task_id = ?5,
+                 updated_at = ?6
+             WHERE id = ?1",
+            params![
+                session_id,
+                update.status,
+                update.draft_title,
+                update.draft_markdown,
+                update.task_id,
+                timestamp_now()
+            ],
+        )
+        .map_err(|error| format!("failed to update intake session {session_id}: {error}"))?;
+    Ok(())
+}
+
+pub fn insert_intake_message(
+    runtime: &RuntimePaths,
+    session_id: &str,
+    author_kind: &str,
+    message_kind: &str,
+    body: &str,
+) -> Result<(), String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let created_at = timestamp_now();
+    connection
+        .execute(
+            "INSERT INTO intake_messages (
+                session_id, author_kind, message_kind, body, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, author_kind, message_kind, body, created_at],
+        )
+        .map_err(|error| format!("failed to insert intake message for {session_id}: {error}"))?;
+    connection
+        .execute(
+            "UPDATE intake_sessions SET updated_at = ?2 WHERE id = ?1",
+            params![session_id, timestamp_now()],
+        )
+        .map_err(|error| {
+            format!("failed to update intake session timestamp {session_id}: {error}")
+        })?;
+    Ok(())
+}
+
+pub fn list_intake_messages(
+    runtime: &RuntimePaths,
+    session_id: &str,
+) -> Result<Vec<IntakeMessageRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, session_id, author_kind, message_kind, body, created_at
+             FROM intake_messages
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|error| format!("failed to prepare intake message query: {error}"))?;
+
+    let rows = statement
+        .query_map([session_id], |row| {
+            Ok(IntakeMessageRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                author_kind: row.get(2)?,
+                message_kind: row.get(3)?,
+                body: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| format!("failed to query intake messages for {session_id}: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode intake messages for {session_id}: {error}"))
+}
+
 pub fn insert_task(runtime: &RuntimePaths, task: &TaskRecord) -> Result<(), String> {
     let connection = open_connection(&runtime.state_db)?;
     let timestamp = timestamp_now();
@@ -283,6 +549,18 @@ pub fn insert_task(runtime: &RuntimePaths, task: &TaskRecord) -> Result<(), Stri
             ],
         )
         .map_err(|error| format!("failed to insert handoff artifact for {}: {error}", task.id))?;
+
+    record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "task",
+            scope_id: &task.id,
+            task_id: Some(&task.id),
+            event_kind: "task_created",
+            headline: "Task created",
+            detail: Some(&task.title),
+        },
+    )?;
 
     Ok(())
 }
@@ -447,6 +725,19 @@ pub fn create_stage_run(
         )
         .map_err(|error| format!("failed to create stage run {run_id}: {error}"))?;
 
+    let detail = format!("{} started for {}", stage, task_id);
+    record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "run",
+            scope_id: &run_id,
+            task_id: Some(task_id),
+            event_kind: "stage_started",
+            headline: "Stage started",
+            detail: Some(&detail),
+        },
+    )?;
+
     Ok(StageRunRecord {
         id: run_id,
         task_id: task_id.to_string(),
@@ -476,6 +767,35 @@ pub fn complete_stage_run(
             params![run_id, status, timestamp_now(), exit_code, error_summary],
         )
         .map_err(|error| format!("failed to complete stage run {run_id}: {error}"))?;
+
+    let mut stage = String::new();
+    let mut task_id = String::new();
+    let _ = connection.query_row(
+        "SELECT task_id, stage FROM stage_runs WHERE id = ?1",
+        [run_id],
+        |row| {
+            task_id = row.get(0)?;
+            stage = row.get(1)?;
+            Ok(())
+        },
+    );
+    let detail = format!(
+        "{} {} with exit_code={}",
+        stage,
+        status,
+        exit_code.map_or_else(|| "none".to_string(), |value| value.to_string())
+    );
+    record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "run",
+            scope_id: run_id,
+            task_id: (!task_id.is_empty()).then_some(task_id.as_str()),
+            event_kind: "stage_completed",
+            headline: "Stage updated",
+            detail: Some(&detail),
+        },
+    )?;
     Ok(())
 }
 
@@ -533,6 +853,19 @@ pub fn transition_task_state(
             ],
         )
         .map_err(|error| format!("failed to record state transition for {task_id}: {error}"))?;
+
+    let detail = format!("{} -> {}", from.as_str(), to.as_str());
+    record_activity_event(
+        runtime,
+        ActivityEventCreate {
+            scope_kind: "task",
+            scope_id: task_id,
+            task_id: Some(task_id),
+            event_kind: "state_transition",
+            headline: "Task state changed",
+            detail: Some(&detail),
+        },
+    )?;
 
     Ok(())
 }
@@ -832,6 +1165,136 @@ pub fn list_human_actions(
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to decode human actions for {task_id}: {error}"))
+}
+
+pub fn record_activity_event(
+    runtime: &RuntimePaths,
+    event: ActivityEventCreate<'_>,
+) -> Result<(), String> {
+    let connection = open_connection(&runtime.state_db)?;
+    connection
+        .execute(
+            "INSERT INTO activity_events (
+                scope_kind, scope_id, task_id, event_kind, headline, detail, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.scope_kind,
+                event.scope_id,
+                event.task_id,
+                event.event_kind,
+                event.headline,
+                event.detail,
+                timestamp_now()
+            ],
+        )
+        .map_err(|error| {
+            format!(
+                "failed to record activity event {}: {error}",
+                event.event_kind
+            )
+        })?;
+    Ok(())
+}
+
+pub fn list_recent_activity_events(
+    runtime: &RuntimePaths,
+    limit: usize,
+) -> Result<Vec<ActivityEventRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, scope_kind, scope_id, task_id, event_kind, headline, detail, created_at
+             FROM activity_events
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?1",
+        )
+        .map_err(|error| format!("failed to prepare activity query: {error}"))?;
+
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok(ActivityEventRecord {
+                id: row.get(0)?,
+                scope_kind: row.get(1)?,
+                scope_id: row.get(2)?,
+                task_id: row.get(3)?,
+                event_kind: row.get(4)?,
+                headline: row.get(5)?,
+                detail: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| format!("failed to query activity events: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode activity events: {error}"))
+}
+
+pub fn list_task_activity_events(
+    runtime: &RuntimePaths,
+    task_id: &str,
+    limit: usize,
+) -> Result<Vec<ActivityEventRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, scope_kind, scope_id, task_id, event_kind, headline, detail, created_at
+             FROM activity_events
+             WHERE task_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?2",
+        )
+        .map_err(|error| format!("failed to prepare task activity query for {task_id}: {error}"))?;
+
+    let rows = statement
+        .query_map(params![task_id, limit as i64], |row| {
+            Ok(ActivityEventRecord {
+                id: row.get(0)?,
+                scope_kind: row.get(1)?,
+                scope_id: row.get(2)?,
+                task_id: row.get(3)?,
+                event_kind: row.get(4)?,
+                headline: row.get(5)?,
+                detail: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| format!("failed to query task activity for {task_id}: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode task activity for {task_id}: {error}"))
+}
+
+pub fn get_latest_stage_run(
+    runtime: &RuntimePaths,
+    task_id: &str,
+) -> Result<Option<StageRunRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, stage, status, attempt_number, started_at, finished_at, exit_code, error_summary
+             FROM stage_runs
+             WHERE task_id = ?1
+             ORDER BY started_at DESC, id DESC
+             LIMIT 1",
+        )
+        .map_err(|error| format!("failed to prepare latest stage run query for {task_id}: {error}"))?;
+
+    statement
+        .query_row([task_id], |row| {
+            Ok(StageRunRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                stage: row.get(2)?,
+                status: row.get(3)?,
+                attempt_number: row.get(4)?,
+                started_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                exit_code: row.get(7)?,
+                error_summary: row.get(8)?,
+            })
+        })
+        .optional()
+        .map_err(|error| format!("failed to load latest run for {task_id}: {error}"))
 }
 
 fn open_connection(path: &Path) -> Result<Connection, String> {
