@@ -1,6 +1,9 @@
 use std::fs;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::{
     app::RuntimePaths,
@@ -201,8 +204,19 @@ struct QaEvidence {
     log_path: PathBuf,
     screenshot_path: PathBuf,
     har_path: PathBuf,
+    target_name: String,
+    target_url: String,
+    startup_log_path: Option<PathBuf>,
     capture_succeeded: bool,
     capture_notes: Vec<String>,
+}
+
+struct QaAppRuntime {
+    target_name: String,
+    target_url: String,
+    selector: String,
+    startup_log_path: Option<PathBuf>,
+    child: Option<Child>,
 }
 
 fn execute_scenarios(
@@ -342,6 +356,26 @@ fn execute_scenario(
         };
     }
 
+    if normalized_heading.contains("creating ")
+        || normalized_heading.contains("adding ")
+        || normalized_heading.contains("verifying ")
+    {
+        let mut notes = Vec::new();
+        let passed = evidence.capture_succeeded;
+        notes.push(format!(
+            "qa targeted `{}` at {}",
+            evidence.target_name, evidence.target_url
+        ));
+        if !evidence.capture_notes.is_empty() {
+            notes.extend(evidence.capture_notes.clone());
+        }
+        return QaScenarioResult {
+            heading,
+            passed,
+            notes,
+        };
+    }
+
     if normalized_heading.contains("sample app route loads successfully") {
         let passed = evidence.capture_succeeded;
         return QaScenarioResult {
@@ -390,19 +424,22 @@ fn capture_browser_evidence(
         .join(format!("{run_id}-board.png"));
     let har_path = runtime.qa_traces_dir.join(format!("{run_id}.har"));
 
-    let target = qa_browser_target(task);
+    let mut app_runtime = start_qa_target(runtime, task, run_id)?;
+    let target_name = app_runtime.target_name.clone();
+    let target_url = app_runtime.target_url.clone();
+    let selector = app_runtime.selector.clone();
     let output = Command::new("npx")
         .arg("playwright")
         .arg("screenshot")
         .arg("--browser")
         .arg("chromium")
         .arg("--wait-for-selector")
-        .arg(target.selector)
+        .arg(&selector)
         .arg("--wait-for-timeout")
         .arg("750")
         .arg("--save-har")
         .arg(&har_path)
-        .arg(target.url)
+        .arg(&target_url)
         .arg(&screenshot_path)
         .output()
         .map_err(|error| format!("failed to invoke Playwright screenshot command: {error}"))?;
@@ -429,7 +466,7 @@ fn capture_browser_evidence(
     if capture_succeeded {
         capture_notes.push(format!(
             "Playwright captured QA target `{}` successfully",
-            target.name
+            target_name
         ));
     } else {
         if !output.status.success() {
@@ -474,35 +511,18 @@ fn capture_browser_evidence(
         )
     })?;
 
+    stop_qa_target(&mut app_runtime);
+
     Ok(QaEvidence {
         log_path,
         screenshot_path,
         har_path,
+        target_name,
+        target_url,
+        startup_log_path: app_runtime.startup_log_path,
         capture_succeeded,
         capture_notes,
     })
-}
-
-struct QaBrowserTarget {
-    name: &'static str,
-    url: &'static str,
-    selector: &'static str,
-}
-
-fn qa_browser_target(task: &TaskRecord) -> QaBrowserTarget {
-    if is_sample_app_task(task) {
-        QaBrowserTarget {
-            name: "sample-app",
-            url: "http://127.0.0.1:3000/sample-app",
-            selector: "#sample-app.ready",
-        }
-    } else {
-        QaBrowserTarget {
-            name: "patron-board",
-            url: "http://127.0.0.1:3000/board",
-            selector: "#task-board",
-        }
-    }
 }
 
 fn is_sample_app_task(task: &TaskRecord) -> bool {
@@ -512,6 +532,95 @@ fn is_sample_app_task(task: &TaskRecord) -> bool {
         task.goal.to_ascii_lowercase()
     );
     haystack.contains("sample app") || haystack.contains("sample-app")
+}
+
+fn start_qa_target(
+    runtime: &RuntimePaths,
+    task: &TaskRecord,
+    run_id: &str,
+) -> Result<QaAppRuntime, String> {
+    if is_sample_app_task(task) {
+        return Ok(QaAppRuntime {
+            target_name: "sample-app".into(),
+            target_url: "http://127.0.0.1:3000/sample-app".into(),
+            selector: "#sample-app.ready".into(),
+            startup_log_path: None,
+            child: None,
+        });
+    }
+
+    let repo_root = runtime.repo_root();
+    let manage_py = repo_root.join("manage.py");
+    let venv_python = repo_root.join(".venv/bin/python");
+    if manage_py.exists() {
+        let python = if venv_python.exists() {
+            venv_python
+        } else {
+            PathBuf::from("python3")
+        };
+        let startup_log_path = runtime.qa_logs_dir.join(format!("{run_id}-startup.log"));
+        let log_file = fs::File::create(&startup_log_path).map_err(|error| {
+            format!(
+                "failed to create QA startup log {}: {error}",
+                startup_log_path.display()
+            )
+        })?;
+        let log_file_err = log_file
+            .try_clone()
+            .map_err(|error| format!("failed to clone QA startup log file: {error}"))?;
+        let mut command = Command::new(&python);
+        command
+            .current_dir(repo_root)
+            .arg("manage.py")
+            .arg("runserver")
+            .arg("127.0.0.1:8001")
+            .arg("--noreload")
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_err));
+        let child = command.spawn().map_err(|error| {
+            format!(
+                "failed to start Django QA target with {:?}: {error}",
+                python
+            )
+        })?;
+        wait_for_port("127.0.0.1", 8001, Duration::from_secs(20)).map_err(|error| {
+            format!("django QA target did not become ready at http://127.0.0.1:8001/: {error}")
+        })?;
+
+        return Ok(QaAppRuntime {
+            target_name: "django-app".into(),
+            target_url: "http://127.0.0.1:8001/".into(),
+            selector: "body".into(),
+            startup_log_path: Some(startup_log_path),
+            child: Some(child),
+        });
+    }
+
+    Ok(QaAppRuntime {
+        target_name: "patron-board".into(),
+        target_url: "http://127.0.0.1:3000/board".into(),
+        selector: "#task-board".into(),
+        startup_log_path: None,
+        child: None,
+    })
+}
+
+fn stop_qa_target(runtime: &mut QaAppRuntime) {
+    if let Some(child) = runtime.child.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn wait_for_port(host: &str, port: u16, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if TcpStream::connect((host, port)).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!("timed out waiting for {host}:{port}"))
 }
 
 fn build_qa_report(
@@ -558,7 +667,7 @@ fn build_qa_report(
     };
 
     format!(
-        "# QA Report\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Outcome\n- Status: {}\n- Next state: `{}`\n\n## Scenario Results\n{}\n\n## Evidence\n- QA log: `{}`\n- Screenshot: `{}`\n- HAR: `{}`\n{}\n",
+        "# QA Report\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Outcome\n- Status: {}\n- Next state: `{}`\n\n## QA Target\n- Target name: `{}`\n- Target URL: `{}`\n{}\n## Scenario Results\n{}\n\n## Evidence\n- QA log: `{}`\n- Screenshot: `{}`\n- HAR: `{}`\n{}\n",
         task.id,
         task.title,
         overall_status,
@@ -567,6 +676,13 @@ fn build_qa_report(
         } else {
             "fix_required"
         },
+        evidence.target_name,
+        evidence.target_url,
+        evidence
+            .startup_log_path
+            .as_ref()
+            .map(|path| format!("- Startup log: `{}`\n\n", path.display()))
+            .unwrap_or_default(),
         scenarios,
         evidence.log_path.display(),
         evidence.screenshot_path.display(),
@@ -631,6 +747,20 @@ fn upsert_qa_artifacts(
             stage_run_id: Some(run_id),
         },
     )?;
+    if let Some(startup_log_path) = &evidence.startup_log_path {
+        db::upsert_working_artifact(
+            runtime,
+            WorkingArtifactUpsert {
+                task_id,
+                role: "qa_startup_log",
+                artifact_kind: "qa_startup_log",
+                relative_path: &relative_qa_path(startup_log_path),
+                media_type: "text/plain",
+                required_for_stage: false,
+                stage_run_id: Some(run_id),
+            },
+        )?;
+    }
 
     validate_required_artifacts(&[qa_report_path])?;
     Ok(())
@@ -805,6 +935,9 @@ mod tests {
             log_path: Path::new(".patron/qa/logs/demo.log").into(),
             screenshot_path: Path::new(".patron/qa/screenshots/demo.png").into(),
             har_path: Path::new(".patron/qa/traces/demo.har").into(),
+            target_name: "patron-board".into(),
+            target_url: "http://127.0.0.1:3000/board".into(),
+            startup_log_path: None,
             capture_succeeded: true,
             capture_notes: vec![],
         };
@@ -840,6 +973,9 @@ mod tests {
                 log_path: Path::new(".patron/qa/logs/demo.log").into(),
                 screenshot_path: Path::new(".patron/qa/screenshots/demo.png").into(),
                 har_path: Path::new(".patron/qa/traces/demo.har").into(),
+                target_name: "patron-board".into(),
+                target_url: "http://127.0.0.1:3000/board".into(),
+                startup_log_path: None,
                 capture_succeeded: true,
                 capture_notes: vec!["Playwright captured the Patron home page successfully".into()],
             },

@@ -10,7 +10,7 @@ use crate::{
     domain::task_lifecycle::{
         ActorKind, HumanAction, TaskState, TaskStateMachine, TransitionMetadata,
     },
-    runner::{self, RunnerCompletion, RunnerJob, RunnerOutcome},
+    runner::{self, RepoSnapshot, RunnerCompletion, RunnerJob, RunnerOutcome},
 };
 
 pub fn status_label() -> &'static str {
@@ -514,80 +514,221 @@ pub fn run_development(runtime: &RuntimePaths, task_id: &str) -> Result<(), Stri
             TaskState::Developing,
             &development_metadata,
         )?;
+        let stage_result = (|| -> Result<RunnerOutcome, String> {
+            let workspace_path = runtime.tasks_dir.join(&task.id);
+            let task_md = workspace_path.join("task.md");
+            let plan_md = workspace_path.join("plan.md");
+            let qa_steps_md = workspace_path.join("qa-steps.md");
+            validate_required_artifacts(&[&task_md, &plan_md, &qa_steps_md])?;
 
-        let workspace_path = runtime.tasks_dir.join(&task.id);
-        let task_md = workspace_path.join("task.md");
-        let plan_md = workspace_path.join("plan.md");
-        let qa_steps_md = workspace_path.join("qa-steps.md");
-        validate_required_artifacts(&[&task_md, &plan_md, &qa_steps_md])?;
+            let task_input = fs::read_to_string(&task_md)
+                .map_err(|error| format!("failed to read {}: {error}", task_md.display()))?;
+            let plan_input = fs::read_to_string(&plan_md)
+                .map_err(|error| format!("failed to read {}: {error}", plan_md.display()))?;
+            let qa_input = fs::read_to_string(&qa_steps_md)
+                .map_err(|error| format!("failed to read {}: {error}", qa_steps_md.display()))?;
 
-        let task_input = fs::read_to_string(&task_md)
-            .map_err(|error| format!("failed to read {}: {error}", task_md.display()))?;
-        let plan_input = fs::read_to_string(&plan_md)
-            .map_err(|error| format!("failed to read {}: {error}", plan_md.display()))?;
-        let qa_input = fs::read_to_string(&qa_steps_md)
-            .map_err(|error| format!("failed to read {}: {error}", qa_steps_md.display()))?;
+            let snapshot_before = runner::capture_repo_snapshot(runtime.repo_root())?;
+            let development_prompt = build_development_prompt(
+                &task,
+                &task_input,
+                &plan_input,
+                &qa_input,
+                &snapshot_before,
+            );
+            let prompt_path = workspace_path.join("development-prompt.md");
+            fs::write(&prompt_path, &development_prompt).map_err(|error| {
+                format!(
+                    "failed to write development prompt for {} at {}: {error}",
+                    task.id,
+                    prompt_path.display()
+                )
+            })?;
+            upsert_text_artifact(
+                runtime,
+                &task.id,
+                run.id.as_str(),
+                "development_prompt_md",
+                "development_prompt",
+                &format!(".patron/tasks/{}/development-prompt.md", task.id),
+            )?;
 
-        let development_summary =
-            build_development_summary(&task, &task_input, &plan_input, &qa_input);
-        let summary_path = workspace_path.join("development-summary.md");
-        fs::write(&summary_path, development_summary).map_err(|error| {
-            format!(
-                "failed to write development-summary.md for {} at {}: {error}",
-                task.id,
-                summary_path.display()
+            let codex_response_path = workspace_path.join("development-codex-response.md");
+            let codex_result = runner::run_codex_exec(
+                runtime.repo_root(),
+                &development_prompt,
+                &codex_response_path,
+            )?;
+            runner::append_runner_log(
+                log_path,
+                &format!(
+                    "codex_exit_code: {}\n--- codex stdout ---\n{}\n--- codex stderr ---\n{}\n",
+                    codex_result.exit_code, codex_result.stdout, codex_result.stderr
+                ),
+            )?;
+            if codex_result.exit_code != 0 {
+                return Err(format!(
+                    "codex development execution failed with exit code {}",
+                    codex_result.exit_code
+                ));
+            }
+
+            let snapshot_after = runner::capture_repo_snapshot(runtime.repo_root())?;
+            let repo_artifact_paths = runner::write_repo_artifact_set(
+                runtime,
+                &task.id,
+                run.id.as_str(),
+                "development",
+                &snapshot_before,
+                &snapshot_after,
+            )?;
+            if !snapshot_after.has_changes {
+                return Err("codex completed but no repository changes were detected".into());
+            }
+            upsert_text_artifact(
+                runtime,
+                &task.id,
+                run.id.as_str(),
+                "development_codex_response_md",
+                "development_response",
+                &format!(".patron/tasks/{}/development-codex-response.md", task.id),
+            )?;
+
+            let development_summary = build_development_summary(
+                &task,
+                &task_input,
+                &plan_input,
+                &qa_input,
+                &codex_result.final_message,
+                &snapshot_before,
+                &snapshot_after,
+            );
+            let summary_path = workspace_path.join("development-summary.md");
+            fs::write(&summary_path, development_summary).map_err(|error| {
+                format!(
+                    "failed to write development-summary.md for {} at {}: {error}",
+                    task.id,
+                    summary_path.display()
+                )
+            })?;
+            validate_required_artifacts(&[&summary_path])?;
+            fs::write(&codex_response_path, codex_result.final_message).map_err(|error| {
+                format!(
+                    "failed to write codex development response for {} at {}: {error}",
+                    task.id,
+                    codex_response_path.display()
+                )
+            })?;
+
+            db::upsert_working_artifact(
+                runtime,
+                WorkingArtifactUpsert {
+                    task_id: &task.id,
+                    role: "development_summary_md",
+                    artifact_kind: "development_summary",
+                    relative_path: &format!(".patron/tasks/{}/development-summary.md", task.id),
+                    media_type: "text/markdown",
+                    required_for_stage: true,
+                    stage_run_id: Some(run.id.as_str()),
+                },
+            )?;
+
+            append_planning_log(
+                log_path,
+                &[
+                    format!("consumed {}", task_md.display()),
+                    format!("consumed {}", plan_md.display()),
+                    format!("consumed {}", qa_steps_md.display()),
+                    format!("generated {}", prompt_path.display()),
+                    format!("generated {}", codex_response_path.display()),
+                    format!("generated {}", summary_path.display()),
+                    format!(
+                        "changed files {}",
+                        if snapshot_after.changed_files.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            snapshot_after.changed_files.join(", ")
+                        }
+                    ),
+                    format!(
+                        "repo artifacts {}",
+                        repo_artifact_paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ],
+            )?;
+
+            let finished_metadata = transition_metadata(
+                ActorKind::Runner,
+                "codex development completed with repository changes and task ready for review",
+                Some("development_completed"),
+                Some(run.id.as_str()),
+            );
+            TaskStateMachine::validate_transition(
+                TaskState::Developing,
+                TaskState::ReadyForReview,
+                &finished_metadata,
             )
-        })?;
-        validate_required_artifacts(&[&summary_path])?;
+            .map_err(|error| {
+                format!("invalid developing->ready_for_review transition: {error:?}")
+            })?;
+            db::transition_task_state(
+                runtime,
+                &task.id,
+                TaskState::Developing,
+                TaskState::ReadyForReview,
+                &finished_metadata,
+            )?;
 
-        db::upsert_working_artifact(
-            runtime,
-            WorkingArtifactUpsert {
-                task_id: &task.id,
-                role: "development_summary_md",
-                artifact_kind: "development_summary",
-                relative_path: &format!(".patron/tasks/{}/development-summary.md", task.id),
-                media_type: "text/markdown",
-                required_for_stage: true,
-                stage_run_id: Some(run.id.as_str()),
-            },
-        )?;
+            Ok(RunnerOutcome {
+                completion: RunnerCompletion::Completed,
+                exit_code: 0,
+                error_summary: None,
+            })
+        })();
 
-        append_planning_log(
-            log_path,
-            &[
-                format!("consumed {}", task_md.display()),
-                format!("consumed {}", plan_md.display()),
-                format!("consumed {}", qa_steps_md.display()),
-                format!("generated {}", summary_path.display()),
-            ],
-        )?;
-
-        let finished_metadata = transition_metadata(
-            ActorKind::Runner,
-            "development summary generated and task ready for review",
-            Some("development_completed"),
-            Some(run.id.as_str()),
-        );
-        TaskStateMachine::validate_transition(
-            TaskState::Developing,
-            TaskState::ReadyForReview,
-            &finished_metadata,
-        )
-        .map_err(|error| format!("invalid developing->ready_for_review transition: {error:?}"))?;
-        db::transition_task_state(
-            runtime,
-            &task.id,
-            TaskState::Developing,
-            TaskState::ReadyForReview,
-            &finished_metadata,
-        )?;
-
-        Ok(RunnerOutcome {
-            completion: RunnerCompletion::Completed,
-            exit_code: 0,
-            error_summary: None,
-        })
+        match stage_result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let recovery_metadata = transition_metadata(
+                    ActorKind::Runner,
+                    "development failed and task returned to ready_for_development for retry",
+                    Some("development_failed_retry_ready"),
+                    Some(run.id.as_str()),
+                );
+                TaskStateMachine::validate_transition(
+                    TaskState::Developing,
+                    TaskState::ReadyForDevelopment,
+                    &recovery_metadata,
+                )
+                .map_err(|transition_error| {
+                    format!(
+                        "invalid developing->ready_for_development recovery transition: {transition_error:?}"
+                    )
+                })?;
+                db::transition_task_state(
+                    runtime,
+                    &task.id,
+                    TaskState::Developing,
+                    TaskState::ReadyForDevelopment,
+                    &recovery_metadata,
+                )?;
+                append_planning_log(
+                    log_path,
+                    &[format!(
+                        "development failure returned task to retry-ready state: {error}"
+                    )],
+                )?;
+                Ok(RunnerOutcome {
+                    completion: RunnerCompletion::Failed,
+                    exit_code: 1,
+                    error_summary: Some(error),
+                })
+            }
+        }
     })?;
 
     Ok(())
@@ -646,7 +787,17 @@ pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
         let task_md = workspace_path.join("task.md");
         let plan_md = workspace_path.join("plan.md");
         let development_summary_md = workspace_path.join("development-summary.md");
-        validate_required_artifacts(&[&task_md, &plan_md, &development_summary_md])?;
+        let changed_files_path = workspace_path.join("development-changed-files.txt");
+        let diff_patch_path = workspace_path.join("development-diff.patch");
+        let diff_stat_path = workspace_path.join("development-diff-stat.txt");
+        validate_required_artifacts(&[
+            &task_md,
+            &plan_md,
+            &development_summary_md,
+            &changed_files_path,
+            &diff_patch_path,
+            &diff_stat_path,
+        ])?;
 
         let task_input = fs::read_to_string(&task_md)
             .map_err(|error| format!("failed to read {}: {error}", task_md.display()))?;
@@ -658,10 +809,28 @@ pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
                 development_summary_md.display()
             )
         })?;
+        let changed_files_input = fs::read_to_string(&changed_files_path)
+            .map_err(|error| format!("failed to read {}: {error}", changed_files_path.display()))?;
+        let diff_patch_input = fs::read_to_string(&diff_patch_path)
+            .map_err(|error| format!("failed to read {}: {error}", diff_patch_path.display()))?;
+        let diff_stat_input = fs::read_to_string(&diff_stat_path)
+            .map_err(|error| format!("failed to read {}: {error}", diff_stat_path.display()))?;
 
-        let review_result =
-            review_development_outputs(&task_input, &plan_input, &development_input);
-        let review_md = build_review_document(&task, &review_result);
+        let review_result = review_development_outputs(
+            &task,
+            &task_input,
+            &plan_input,
+            &development_input,
+            &changed_files_input,
+            &diff_patch_input,
+            &diff_stat_input,
+        );
+        let review_md = build_review_document(
+            &task,
+            &review_result,
+            &changed_files_input,
+            &diff_stat_input,
+        );
         let review_path = workspace_path.join("review.md");
         fs::write(&review_path, review_md).map_err(|error| {
             format!(
@@ -691,6 +860,8 @@ pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
                 format!("consumed {}", task_md.display()),
                 format!("consumed {}", plan_md.display()),
                 format!("consumed {}", development_summary_md.display()),
+                format!("consumed {}", changed_files_path.display()),
+                format!("consumed {}", diff_patch_path.display()),
                 format!("generated {}", review_path.display()),
                 format!("review outcome {}", review_result.outcome_label()),
             ],
@@ -1014,24 +1185,106 @@ impl ReviewResult {
     }
 }
 
+fn build_development_prompt(
+    task: &TaskRecord,
+    task_md: &str,
+    plan_md: &str,
+    qa_steps_md: &str,
+    repo_before: &RepoSnapshot,
+) -> String {
+    let dirty_note = if repo_before.has_changes {
+        "The repository already has uncommitted changes. Preserve unrelated work and only touch files required for this task."
+    } else {
+        "The repository was clean before development started."
+    };
+    format!(
+        "You are implementing a Patron development task in a local git repository.\n\nTask ID: {task_id}\nTask Title: {title}\n\nRules:\n- make real repository changes\n- keep the change set as small as possible while satisfying the plan\n- do not revert unrelated user changes\n- prefer straightforward, maintainable code\n- if this is an empty repository and the task requests Django, create the minimal Django project/app structure needed for the first delivery slice\n- when HTMX or Alpine.js are requested, use them narrowly and intentionally\n- leave the repository in a reviewable state\n\nRepository state before execution:\n- branch: {branch}\n- dirty: {dirty}\n- changed files before execution:\n{changed_before}\n\n{dirty_note}\n\nPlanning inputs follow.\n\n# task.md\n{task_md}\n\n# plan.md\n{plan_md}\n\n# qa-steps.md\n{qa_steps_md}\n\nWhen you finish, provide a concise final summary that mentions the main files you changed and any setup required to run the result.\n",
+        task_id = task.id,
+        title = task.title,
+        branch = repo_before.branch,
+        dirty = if repo_before.has_changes { "yes" } else { "no" },
+        changed_before = if repo_before.changed_files.is_empty() {
+            "(none)".to_string()
+        } else {
+            repo_before.changed_files.join("\n")
+        },
+        dirty_note = dirty_note,
+        task_md = task_md,
+        plan_md = plan_md,
+        qa_steps_md = qa_steps_md
+    )
+}
+
+fn upsert_text_artifact(
+    runtime: &RuntimePaths,
+    task_id: &str,
+    run_id: &str,
+    role: &str,
+    artifact_kind: &str,
+    relative_path: &str,
+) -> Result<(), String> {
+    db::upsert_working_artifact(
+        runtime,
+        WorkingArtifactUpsert {
+            task_id,
+            role,
+            artifact_kind,
+            relative_path,
+            media_type: if relative_path.ends_with(".md") {
+                "text/markdown"
+            } else if relative_path.ends_with(".patch") {
+                "text/x-diff"
+            } else {
+                "text/plain"
+            },
+            required_for_stage: false,
+            stage_run_id: Some(run_id),
+        },
+    )
+}
+
 fn build_development_summary(
     task: &TaskRecord,
     task_md: &str,
     plan_md: &str,
     qa_steps_md: &str,
+    codex_final_message: &str,
+    before: &RepoSnapshot,
+    after: &RepoSnapshot,
 ) -> String {
+    let changed_files = if after.changed_files.is_empty() {
+        "- No changed files were detected.".to_string()
+    } else {
+        after
+            .changed_files
+            .iter()
+            .map(|file| format!("- `{file}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
-        "# Development Summary\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Inputs Consumed\n- `task.md`\n- `plan.md`\n- `qa-steps.md`\n\n## Goal Snapshot\n{}\n\n## Development Contract\n- Development must run from the planning artifacts, not free-form memory.\n- The next implementation step should produce concrete code changes against the repository.\n- The resulting work must be reviewable before QA begins.\n\n## Review Readiness\n- Planning inputs were present at execution time.\n- A development summary has been generated for reviewers.\n- The task can now move into the review stage.\n\n## Planning Signals\n### task.md excerpt\n{}\n\n### plan.md excerpt\n{}\n\n### qa-steps.md excerpt\n{}\n",
+        "# Development Summary\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Inputs Consumed\n- `task.md`\n- `plan.md`\n- `qa-steps.md`\n\n## Goal Snapshot\n{}\n\n## Development Contract\n- Development must run from the planning artifacts, not free-form memory.\n- Development must produce concrete code changes against the target repository.\n- The resulting work must be reviewable before QA begins.\n\n## Repository State\n- Branch before execution: `{}`\n- Branch after execution: `{}`\n- Dirty before execution: `{}`\n- Dirty after execution: `{}`\n\n## Changed Files\n{}\n\n## Codex Final Message\n{}\n\n## Review Readiness\n- Planning inputs were present at execution time.\n- Real repository outputs were captured for review.\n- The task can now move into the review stage.\n\n## Planning Signals\n### task.md excerpt\n{}\n\n### plan.md excerpt\n{}\n\n### qa-steps.md excerpt\n{}\n",
         task.id,
         task.title,
         task.goal,
+        before.branch,
+        after.branch,
+        if before.has_changes { "yes" } else { "no" },
+        if after.has_changes { "yes" } else { "no" },
+        changed_files,
+        excerpt(codex_final_message),
         excerpt(task_md),
         excerpt(plan_md),
         excerpt(qa_steps_md)
     )
 }
 
-fn build_review_document(task: &TaskRecord, result: &ReviewResult) -> String {
+fn build_review_document(
+    task: &TaskRecord,
+    result: &ReviewResult,
+    changed_files: &str,
+    diff_stat: &str,
+) -> String {
     let findings = if result.findings.is_empty() {
         "- No findings.".to_string()
     } else {
@@ -1042,12 +1295,27 @@ fn build_review_document(task: &TaskRecord, result: &ReviewResult) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let changed_files_section = if changed_files.trim().is_empty() {
+        "- No changed files were captured.".to_string()
+    } else {
+        changed_files
+            .lines()
+            .map(|line| format!("- `{}`", line.trim()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     format!(
-        "# Review\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Outcome\n- Status: {}\n\n## Findings\n{}\n\n## Review Notes\n- Review runs after development and before QA.\n- Findings should route deterministically into `fix_required`.\n- Passing review should route the task to `ready_for_qa`.\n",
+        "# Review\n\n## Task\n- ID: `{}`\n- Title: {}\n\n## Outcome\n- Status: {}\n\n## Changed Files\n{}\n\n## Diff Summary\n{}\n\n## Findings\n{}\n\n## Review Notes\n- Review runs after development and before QA.\n- Findings should route deterministically into `fix_required`.\n- Passing review should route the task to `ready_for_qa`.\n",
         task.id,
         task.title,
         result.outcome_label(),
+        changed_files_section,
+        if diff_stat.trim().is_empty() {
+            "(no diff stat captured)"
+        } else {
+            diff_stat
+        },
         findings
     )
 }
@@ -1246,9 +1514,13 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 }
 
 fn review_development_outputs(
+    task: &TaskRecord,
     task_md: &str,
     plan_md: &str,
     development_summary_md: &str,
+    changed_files_txt: &str,
+    diff_patch: &str,
+    diff_stat: &str,
 ) -> ReviewResult {
     let mut findings = Vec::new();
 
@@ -1266,6 +1538,48 @@ fn review_development_outputs(
 
     if !plan_md.contains("# Plan") {
         findings.push("plan.md is missing the expected plan header".to_string());
+    }
+
+    let changed_files = changed_files_txt
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "(no changed files)")
+        .collect::<Vec<_>>();
+    if changed_files.is_empty() {
+        findings.push("development did not produce any changed files".to_string());
+    }
+
+    if diff_patch.trim().is_empty() || diff_patch.contains("(no patch available)") {
+        findings.push("no repository diff patch was captured for review".to_string());
+    }
+
+    if diff_stat.trim().is_empty() || diff_stat.contains("(no diff stat available)") {
+        findings.push("no diff stat was captured for review".to_string());
+    }
+
+    let task_haystack = format!("{}\n{}", task.title, task.goal).to_ascii_lowercase();
+    if task_haystack.contains("django") {
+        let touched_python = changed_files.iter().any(|file| {
+            file.ends_with(".py") || file.contains("manage.py") || file.contains("settings.py")
+        });
+        if !touched_python {
+            findings.push(
+                "task requested Django work but no Python or Django project files were changed"
+                    .to_string(),
+            );
+        }
+    }
+
+    if task_haystack.contains("htmx") {
+        let touched_templates = changed_files.iter().any(|file| {
+            file.ends_with(".html") || file.ends_with(".jinja") || file.contains("templates/")
+        });
+        if !touched_templates {
+            findings.push(
+                "task requested HTMX-oriented behavior but no template files were changed"
+                    .to_string(),
+            );
+        }
     }
 
     ReviewResult {
@@ -1815,6 +2129,7 @@ mod tests {
         FixLoopSource, RepoPlanningContext, TaskRecord, build_development_summary,
         build_fix_log_entry, build_planning_package, derive_title, review_development_outputs,
     };
+    use crate::runner::RepoSnapshot;
 
     #[test]
     fn derive_title_uses_first_non_empty_line() {
@@ -1920,6 +2235,23 @@ mod tests {
             "# Task\nexample",
             "# Plan\nexample",
             "# QA Steps\nexample",
+            "Changed files: app.py",
+            &RepoSnapshot {
+                branch: "main".into(),
+                status_porcelain: String::new(),
+                changed_files: vec![],
+                diff_stat: String::new(),
+                diff_patch: String::new(),
+                has_changes: false,
+            },
+            &RepoSnapshot {
+                branch: "main".into(),
+                status_porcelain: " M app.py".into(),
+                changed_files: vec!["app.py".into()],
+                diff_stat: " app.py | 3 ++-".into(),
+                diff_patch: "diff --git a/app.py b/app.py".into(),
+                has_changes: true,
+            },
         );
 
         assert!(summary.contains("Inputs Consumed"));
@@ -1930,9 +2262,23 @@ mod tests {
     #[test]
     fn review_outputs_pass_when_required_sections_exist() {
         let result = review_development_outputs(
+            &TaskRecord {
+                id: "TASK-0003".into(),
+                title: "Review".into(),
+                goal: "Review output".into(),
+                state: "ready_for_review".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
+                current_stage: None,
+                workspace_path: ".patron/tasks/TASK-0003".into(),
+                handoff_path: ".patron/tasks/TASK-0003/orchestrator-handoff.md".into(),
+            },
             "# Task\ncontent",
             "# Plan\ncontent",
             "## Inputs Consumed\nstuff\n## Review Readiness\nready",
+            "app.py",
+            "diff --git a/app.py b/app.py",
+            " app.py | 3 ++-",
         );
 
         assert!(!result.has_findings);
@@ -1941,7 +2287,25 @@ mod tests {
 
     #[test]
     fn review_outputs_findings_when_sections_are_missing() {
-        let result = review_development_outputs("# Task\ncontent", "# Plan\ncontent", "missing");
+        let result = review_development_outputs(
+            &TaskRecord {
+                id: "TASK-0004".into(),
+                title: "Django task".into(),
+                goal: "Build django flow".into(),
+                state: "ready_for_review".into(),
+                blocked_reason_code: None,
+                blocked_reason_text: None,
+                current_stage: None,
+                workspace_path: ".patron/tasks/TASK-0004".into(),
+                handoff_path: ".patron/tasks/TASK-0004/orchestrator-handoff.md".into(),
+            },
+            "# Task\ncontent",
+            "# Plan\ncontent",
+            "missing",
+            "(no changed files)",
+            "",
+            "",
+        );
 
         assert!(result.has_findings);
         assert!(!result.findings.is_empty());

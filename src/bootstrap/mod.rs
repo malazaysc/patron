@@ -115,6 +115,11 @@ pub fn inspect(runtime: &RuntimePaths, repo: RepoContext) -> BootstrapStatus {
             detail: "required for repository context and future branch-aware execution".into(),
         },
         RequirementCheck {
+            name: "codex",
+            ok: command_succeeds(Command::new("codex").arg("--version")),
+            detail: "required for real development execution against the target repository".into(),
+        },
+        RequirementCheck {
             name: "npx",
             ok: command_succeeds(Command::new("npx").arg("--version")),
             detail: "required for Playwright-backed QA capture".into(),
@@ -174,11 +179,35 @@ pub fn initialize_runtime(
     runtime
         .ensure_layout()
         .map_err(|error| format!("failed to initialize Patron runtime layout: {error}"))?;
+    ensure_runtime_gitignore(repo)?;
     db::initialize(runtime)
         .map_err(|error| format!("failed to initialize Patron sqlite state: {error}"))?;
     db::persist_repo_metadata(runtime, repo)
         .map_err(|error| format!("failed to persist repository metadata: {error}"))?;
     Ok(inspect(runtime, repo.clone()))
+}
+
+fn ensure_runtime_gitignore(repo: &RepoContext) -> Result<(), String> {
+    let gitignore_path = repo.repo_root.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    if existing
+        .lines()
+        .any(|line| line.trim() == ".patron/" || line.trim() == "/.patron/")
+    {
+        return Ok(());
+    }
+
+    let mut contents = existing;
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(".patron/\n");
+    std::fs::write(&gitignore_path, contents).map_err(|error| {
+        format!(
+            "failed to update repository gitignore {}: {error}",
+            gitignore_path.display()
+        )
+    })
 }
 
 fn find_git_root(start: &Path) -> Option<PathBuf> {
