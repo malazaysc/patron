@@ -1,6 +1,6 @@
 pub enum Command {
     Serve,
-    Init,
+    Init { init_git: bool },
     Doctor,
     Help,
     Version,
@@ -11,12 +11,23 @@ pub fn parse() -> Result<Command, String> {
     match args.next().as_deref() {
         None => Ok(Command::Serve),
         Some("serve") => Ok(Command::Serve),
-        Some("init") => Ok(Command::Init),
+        Some("init") => parse_init(args),
         Some("doctor") => Ok(Command::Doctor),
         Some("--help") | Some("-h") | Some("help") => Ok(Command::Help),
         Some("--version") | Some("-V") | Some("version") => Ok(Command::Version),
         Some(other) => Err(format!("unknown Patron command `{other}`")),
     }
+}
+
+fn parse_init(args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut init_git = false;
+    for arg in args {
+        match arg.as_str() {
+            "--git" => init_git = true,
+            other => return Err(format!("unknown Patron init option `{other}`")),
+        }
+    }
+    Ok(Command::Init { init_git })
 }
 
 pub fn help_text() -> String {
@@ -41,6 +52,7 @@ INSTALL:
 
 EXAMPLES:
   patron init
+  patron init --git
   patron doctor
   patron serve
 "

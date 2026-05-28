@@ -106,7 +106,7 @@ pub fn inspect(runtime: &RuntimePaths, repo: RepoContext) -> BootstrapStatus {
             detail: if repo.is_git_repo {
                 format!("detected {}", repo.repo_root.display())
             } else {
-                "current directory is not inside a git repository".into()
+                "current directory is not inside a git repository; run `patron init --git` to initialize one explicitly".into()
             },
         },
         RequirementCheck {
@@ -131,7 +131,7 @@ pub fn inspect(runtime: &RuntimePaths, repo: RepoContext) -> BootstrapStatus {
 
     if !repo.is_git_repo {
         blockers.push(
-            "Patron must run from a git repository root or a child directory inside a git repository. Run `git init` first if this is a brand new project."
+            "Patron must run from a git repository root or a child directory inside a git repository. For a brand new project, run `patron init --git` or `git init` first."
                 .into(),
         );
     }
@@ -185,6 +185,34 @@ pub fn initialize_runtime(
     db::persist_repo_metadata(runtime, repo)
         .map_err(|error| format!("failed to persist repository metadata: {error}"))?;
     Ok(inspect(runtime, repo.clone()))
+}
+
+pub fn initialize_runtime_with_git(cwd: &Path) -> Result<(RuntimePaths, BootstrapStatus), String> {
+    let mut repo = detect_repo_context(cwd);
+    if !repo.is_git_repo {
+        initialize_git_repo(cwd)?;
+        repo = detect_repo_context(cwd);
+    }
+    let runtime = RuntimePaths::discover(&repo.repo_root).map_err(|error| {
+        format!("failed to resolve the Patron runtime root under .patron/: {error}")
+    })?;
+    let status = initialize_runtime(&runtime, &repo)?;
+    Ok((runtime, status))
+}
+
+fn initialize_git_repo(cwd: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("init")
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("failed to run `git init`: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`git init` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_runtime_gitignore(repo: &RepoContext) -> Result<(), String> {

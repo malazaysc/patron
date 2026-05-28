@@ -48,13 +48,18 @@ It is not yet a general-purpose autonomous code delivery system for arbitrary re
 
 Run Patron from the root of a git repository.
 
-If this is a brand new project directory, run:
+If this is a brand new project directory, you can either run:
 
 ```bash
 git init
+patron init
 ```
 
-before `patron init`.
+or let Patron do the safe explicit git setup step for you:
+
+```bash
+patron init --git
+```
 
 ### 1. Install Patron
 
@@ -78,6 +83,14 @@ patron init
 ```
 
 This creates `/.patron/` at the repository root and initializes the SQLite runtime state.
+
+For a brand new non-git directory, use:
+
+```bash
+patron init --git
+```
+
+Patron will only run `git init` when you explicitly opt into it with `--git`.
 
 You can inspect readiness without mutating state:
 

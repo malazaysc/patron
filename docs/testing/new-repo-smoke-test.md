@@ -13,9 +13,9 @@ This checklist defines the minimum credible first-run evaluation for Patron in a
 
 1. Install Patron with `cargo install --path /path/to/patron`.
 2. Clone or create a fresh repository and `cd` to its root.
-3. Run `git init` if the repository was not already initialized.
+3. If the repository is not initialized yet, run either `git init` or `patron init --git`.
 4. Run `patron doctor`.
-5. Run `patron init`.
+5. Run `patron init` if you already initialized git manually, or use `patron init --git` as the combined onboarding step.
 6. Start Patron with `patron serve`.
 7. Open `http://127.0.0.1:3000`.
 8. Confirm the dashboard shows the correct repository name, branch, and runtime root.

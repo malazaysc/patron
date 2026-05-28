@@ -47,7 +47,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", status.summary());
             return Ok(());
         }
-        cli::Command::Init => {
+        cli::Command::Init { init_git } => {
+            if init_git {
+                let (_, status) = bootstrap::initialize_runtime_with_git(&cwd)?;
+                println!("Patron init complete.");
+                println!("{}", status.summary());
+                return Ok(());
+            }
             let status = bootstrap::initialize_runtime(&runtime, &repo)?;
             println!("Patron init complete.");
             println!("{}", status.summary());

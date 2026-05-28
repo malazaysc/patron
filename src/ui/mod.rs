@@ -72,6 +72,16 @@ pub struct TaskDetailView<'a> {
 }
 
 pub fn render_setup(view: SetupView<'_>) -> String {
+    let init_command = if view.bootstrap.repo.is_git_repo {
+        "patron init"
+    } else {
+        "patron init --git"
+    };
+    let setup_copy = if view.bootstrap.repo.is_git_repo {
+        "Patron no longer creates runtime state implicitly on server start. Run the explicit init step, then reload the app."
+    } else {
+        "This directory is not a git repository yet. Patron can initialize git for you, but only when you run the explicit onboarding command."
+    };
     let blockers = if view.bootstrap.blockers.is_empty() {
         "<li>No blocking issues detected.</li>".to_string()
     } else {
@@ -113,9 +123,9 @@ pub fn render_setup(view: SetupView<'_>) -> String {
            <div>\
              <p class=\"eyebrow\">Setup</p>\
              <h1>Initialize Patron for this repository.</h1>\
-             <p class=\"lede\">Patron no longer creates runtime state implicitly on server start. Run the explicit init step, then reload the app.</p>\
+             <p class=\"lede\">{}</p>\
              <div class=\"hero-actions\">\
-               <code>patron init</code>\
+               <code>{}</code>\
                <a class=\"button secondary\" href=\"https://github.com/malazaysc/patron/blob/main/README.md\">Open Getting Started Guide</a>\
              </div>\
            </div>\
@@ -152,6 +162,8 @@ pub fn render_setup(view: SetupView<'_>) -> String {
              </section>\
            </aside>\
          </section>",
+        html_escape(setup_copy),
+        html_escape(init_command),
         view.bootstrap.blockers.len(),
         view.bootstrap.warnings.len(),
         if view.bootstrap.repo.is_git_repo {
