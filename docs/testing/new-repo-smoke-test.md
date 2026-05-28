@@ -11,16 +11,18 @@ This checklist defines the minimum credible first-run evaluation for Patron in a
 
 ## Steps
 
-1. Clone or create a fresh repository and copy Patron into it, or run Patron from the Patron repository for the first smoke test.
-2. Run `cargo run -- init`.
-3. Start Patron with `cargo run`.
-4. Open `http://127.0.0.1:3000`.
-5. Confirm the dashboard shows the correct repository name, branch, and runtime root.
-6. Open `/sample-app` and confirm the sample application renders.
-7. Create one task from the sample app task pack.
-8. Run the task through planning, development, review, QA, and PR preparation as far as the current implementation allows.
-9. Inspect the task detail page.
-10. Confirm artifacts, logs, state history, and QA evidence are visible.
+1. Install Patron with `cargo install --path /path/to/patron`.
+2. Clone or create a fresh repository and `cd` to its root.
+3. Run `patron doctor`.
+4. Run `patron init`.
+5. Start Patron with `patron serve`.
+6. Open `http://127.0.0.1:3000`.
+7. Confirm the dashboard shows the correct repository name, branch, and runtime root.
+8. Open `/sample-app` and confirm the sample application renders.
+9. Create one task from the sample app task pack.
+10. Run the task through planning, development, review, QA, and PR preparation as far as the current implementation allows.
+11. Inspect the task detail page.
+12. Confirm artifacts, logs, state history, and QA evidence are visible.
 
 ## Expected Results
 

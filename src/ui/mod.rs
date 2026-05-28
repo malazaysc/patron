@@ -91,7 +91,7 @@ pub fn render_setup(view: SetupView<'_>) -> String {
              <h1>Initialize Patron for this repository.</h1>\
              <p class=\"lede\">Patron no longer creates runtime state implicitly on server start. Run the explicit init step, then reload the app.</p>\
              <div class=\"hero-actions\">\
-               <code>cargo run -- init</code>\
+               <code>patron init</code>\
                <a class=\"button secondary\" href=\"https://github.com/malazaysc/patron/blob/main/README.md\">Open Getting Started Guide</a>\
              </div>\
            </div>\

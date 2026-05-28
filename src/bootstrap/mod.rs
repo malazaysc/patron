@@ -131,7 +131,7 @@ pub fn inspect(runtime: &RuntimePaths, repo: RepoContext) -> BootstrapStatus {
         );
     }
     if !initialized {
-        blockers.push("Patron runtime is not initialized. Run `cargo run -- init`.".into());
+        blockers.push("Patron runtime is not initialized. Run `patron init`.".into());
     }
     for requirement in &requirements {
         if !requirement.ok {

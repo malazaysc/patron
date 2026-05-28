@@ -47,18 +47,39 @@ It is not yet a general-purpose autonomous code delivery system for arbitrary re
 
 Run Patron from the root of a git repository.
 
-### 1. Initialize Patron
+### 1. Install Patron
+
+From the Patron repository:
 
 ```bash
-cargo run -- init
+cargo install --path .
+```
+
+Then verify the CLI is available:
+
+```bash
+patron --help
+patron --version
+```
+
+### 2. Initialize Patron
+
+```bash
+patron init
 ```
 
 This creates `/.patron/` at the repository root and initializes the SQLite runtime state.
 
-### 2. Start Patron
+You can inspect readiness without mutating state:
 
 ```bash
-cargo run
+patron doctor
+```
+
+### 3. Start Patron
+
+```bash
+patron serve
 ```
 
 The app starts on:
@@ -69,7 +90,7 @@ http://127.0.0.1:3000
 
 If setup is incomplete, Patron will show a setup screen instead of the normal dashboard.
 
-### 3. Open the Built-In Sample App
+### 4. Open the Built-In Sample App
 
 After startup, open:
 
@@ -79,7 +100,7 @@ http://127.0.0.1:3000/sample-app
 
 This tiny app is the recommended first target for dogfooding Patron’s task and QA flow.
 
-### 4. Create a Sample Task
+### 5. Create a Sample Task
 
 Use one of the goals from:
 
@@ -123,6 +144,9 @@ That checklist defines what “ready to test on a new repository” means for th
 Current local commands:
 
 ```bash
+patron init
+patron doctor
+patron serve
 cargo run -- init
 cargo run
 cargo test

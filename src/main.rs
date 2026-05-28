@@ -1,5 +1,6 @@
 mod app;
 mod bootstrap;
+mod cli;
 mod db;
 mod domain;
 mod orchestrator;
@@ -15,6 +16,16 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let command = match cli::parse() {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("{error}");
+            eprintln!();
+            eprintln!("{}", cli::help_text());
+            std::process::exit(2);
+        }
+    };
+
     let cwd = bootstrap::current_dir()
         .map_err(|error| format!("failed to resolve current working directory: {error}"))?;
     let repo = bootstrap::detect_repo_context(&cwd);
@@ -22,12 +33,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         format!("failed to resolve the Patron runtime root under .patron/: {error}")
     })?;
 
-    let mut args = std::env::args().skip(1);
-    if matches!(args.next().as_deref(), Some("init")) {
-        let status = bootstrap::initialize_runtime(&runtime, &repo)?;
-        println!("Patron init complete.");
-        println!("{}", status.summary());
-        return Ok(());
+    match command {
+        cli::Command::Help => {
+            println!("{}", cli::help_text());
+            return Ok(());
+        }
+        cli::Command::Version => {
+            println!("patron {}", cli::version_text());
+            return Ok(());
+        }
+        cli::Command::Doctor => {
+            let status = bootstrap::inspect(&runtime, repo);
+            println!("{}", status.summary());
+            return Ok(());
+        }
+        cli::Command::Init => {
+            let status = bootstrap::initialize_runtime(&runtime, &repo)?;
+            println!("Patron init complete.");
+            println!("{}", status.summary());
+            return Ok(());
+        }
+        cli::Command::Serve => {}
     }
 
     let bootstrap_status = bootstrap::inspect(&runtime, repo.clone());
