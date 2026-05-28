@@ -98,14 +98,6 @@ impl RuntimePaths {
         ]
     }
 
-    pub fn qa_evidence_directories(&self) -> [PathBuf; 3] {
-        [
-            self.qa_logs_dir.clone(),
-            self.qa_screenshots_dir.clone(),
-            self.qa_traces_dir.clone(),
-        ]
-    }
-
     pub fn relative_to_repo(&self, path: &Path) -> PathBuf {
         path.strip_prefix(self.repo_root())
             .unwrap_or(path)
@@ -120,10 +112,12 @@ impl RuntimePaths {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/board", get(board))
+        .route("/tasks", get(tasks_index).post(create_task))
+        .route("/runs", get(runs_index))
         .route("/health", get(health))
         .route("/tasks/{task_id}", get(task_detail))
         .route("/tasks/{task_id}/artifacts/{role}", get(task_artifact))
-        .route("/tasks", post(create_task))
         .route("/tasks/{task_id}/plan", post(run_planning))
         .route("/tasks/{task_id}/develop", post(run_development))
         .route("/tasks/{task_id}/review", post(run_review))
@@ -136,29 +130,45 @@ pub fn build_router(state: AppState) -> Router {
 async fn index(State(state): State<AppState>) -> Html<String> {
     let runtime = state.runtime();
     let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
-    let runtime_directories = runtime
-        .required_directories()
-        .iter()
-        .map(|path| runtime.relative_to_repo(path))
-        .collect::<Vec<_>>();
-    let qa_directories = runtime
-        .qa_evidence_directories()
-        .iter()
-        .map(|path| runtime.relative_to_repo(path))
-        .collect::<Vec<_>>();
     let state_store = db::state_store_status(runtime);
-    let body = ui::render_home(ui::HomeView {
+    let recent_runs = db::list_recent_stage_runs(runtime, 12).unwrap_or_default();
+    let body = ui::render_dashboard(ui::DashboardView {
         runtime_root: &runtime.relative_to_repo(&runtime.root),
-        runtime_directories: &runtime_directories,
-        qa_directories: &qa_directories,
         state_store: &state_store,
         tasks: &task_snapshot,
+        recent_runs: &recent_runs,
         orchestrator_status: orchestrator::status_label(),
         runner_status: runner::status_label(),
         qa_status: qa::status_label(),
     });
 
     Html(body)
+}
+
+async fn board(State(state): State<AppState>) -> Html<String> {
+    let runtime = state.runtime();
+    let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
+    Html(ui::render_board(ui::BoardView {
+        tasks: &task_snapshot,
+    }))
+}
+
+async fn tasks_index(State(state): State<AppState>) -> Html<String> {
+    let runtime = state.runtime();
+    let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
+    Html(ui::render_tasks_index(ui::TaskListView {
+        tasks: &task_snapshot,
+    }))
+}
+
+async fn runs_index(State(state): State<AppState>) -> Html<String> {
+    let runtime = state.runtime();
+    let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
+    let recent_runs = db::list_recent_stage_runs(runtime, 64).unwrap_or_default();
+    Html(ui::render_runs(ui::RunsView {
+        tasks: &task_snapshot,
+        runs: &recent_runs,
+    }))
 }
 
 async fn health() -> &'static str {
@@ -247,7 +257,7 @@ struct TaskCreateForm {
 
 async fn create_task(State(state): State<AppState>, Form(form): Form<TaskCreateForm>) -> Response {
     match orchestrator::create_draft_task(state.runtime(), &form.goal) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(task) => Redirect::to(&format!("/tasks/{}", task.id)).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Task creation failed</h1><p>{error}</p>")),
@@ -261,7 +271,7 @@ async fn run_planning(
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
     match orchestrator::run_planning(state.runtime(), &task_id) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Planning failed</h1><p>{error}</p>")),
@@ -275,7 +285,7 @@ async fn run_development(
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
     match orchestrator::run_development(state.runtime(), &task_id) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Development failed</h1><p>{error}</p>")),
@@ -289,7 +299,7 @@ async fn run_review(
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
     match orchestrator::run_review(state.runtime(), &task_id) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Review failed</h1><p>{error}</p>")),
@@ -303,7 +313,7 @@ async fn run_fix_loop(
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
     match orchestrator::run_fix_loop(state.runtime(), &task_id) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Fix loop failed</h1><p>{error}</p>")),
@@ -314,7 +324,7 @@ async fn run_fix_loop(
 
 async fn run_qa(State(state): State<AppState>, AxumPath(task_id): AxumPath<String>) -> Response {
     match qa::run_qa(state.runtime(), &task_id) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>QA failed</h1><p>{error}</p>")),
@@ -328,7 +338,7 @@ async fn run_pr_preparation(
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
     match orchestrator::run_pr_preparation(state.runtime(), &task_id) {
-        Ok(_) => Redirect::to("/").into_response(),
+        Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>PR preparation failed</h1><p>{error}</p>")),

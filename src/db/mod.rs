@@ -536,6 +536,40 @@ pub fn list_open_stage_runs(runtime: &RuntimePaths) -> Result<Vec<StageRunRecord
         .map_err(|error| format!("failed to decode open stage runs: {error}"))
 }
 
+pub fn list_recent_stage_runs(
+    runtime: &RuntimePaths,
+    limit: usize,
+) -> Result<Vec<StageRunRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, task_id, stage, status, attempt_number, started_at, finished_at, exit_code, error_summary
+             FROM stage_runs
+             ORDER BY started_at DESC, id DESC
+             LIMIT ?1",
+        )
+        .map_err(|error| format!("failed to prepare recent stage run query: {error}"))?;
+
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok(StageRunRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                stage: row.get(2)?,
+                status: row.get(3)?,
+                attempt_number: row.get(4)?,
+                started_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                exit_code: row.get(7)?,
+                error_summary: row.get(8)?,
+            })
+        })
+        .map_err(|error| format!("failed to query recent stage runs: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode recent stage runs: {error}"))
+}
+
 pub fn list_state_transitions(
     runtime: &RuntimePaths,
     task_id: &str,
