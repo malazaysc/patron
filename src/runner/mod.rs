@@ -11,6 +11,9 @@ pub struct RunnerJob {
     pub task_id: String,
     pub stage: String,
     pub summary: String,
+    pub repo_root: String,
+    pub repo_name: String,
+    pub git_branch: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,8 +63,13 @@ where
     fs::write(
         &log_path,
         format!(
-            "run_id: {}\nstage: {}\nsummary: {}\nstatus: running\n\n",
-            run.id, run.stage, job.summary
+            "run_id: {}\nstage: {}\nsummary: {}\nrepo_root: {}\nrepo_name: {}\ngit_branch: {}\nstatus: running\n\n",
+            run.id,
+            run.stage,
+            job.summary,
+            job.repo_root,
+            job.repo_name,
+            job.git_branch.as_deref().unwrap_or("unknown")
         ),
     )
     .map_err(|error| {

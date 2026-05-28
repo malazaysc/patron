@@ -10,20 +10,25 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::{db, orchestrator, qa, runner, ui};
+use crate::{bootstrap::BootstrapStatus, db, orchestrator, qa, runner, ui};
 
 #[derive(Clone)]
 pub struct AppState {
     runtime: RuntimePaths,
+    bootstrap: BootstrapStatus,
 }
 
 impl AppState {
-    pub fn new(runtime: RuntimePaths) -> Self {
-        Self { runtime }
+    pub fn new(runtime: RuntimePaths, bootstrap: BootstrapStatus) -> Self {
+        Self { runtime, bootstrap }
     }
 
     pub fn runtime(&self) -> &RuntimePaths {
         &self.runtime
+    }
+
+    pub fn bootstrap(&self) -> &BootstrapStatus {
+        &self.bootstrap
     }
 }
 
@@ -41,8 +46,8 @@ pub struct RuntimePaths {
 }
 
 impl RuntimePaths {
-    pub fn discover() -> io::Result<Self> {
-        let root = std::env::current_dir()?.join(".patron");
+    pub fn discover(repo_root: &Path) -> io::Result<Self> {
+        let root = repo_root.join(".patron");
 
         Ok(Self {
             logs_dir: root.join("logs"),
@@ -104,7 +109,7 @@ impl RuntimePaths {
             .to_path_buf()
     }
 
-    fn repo_root(&self) -> &Path {
+    pub fn repo_root(&self) -> &Path {
         self.root.parent().unwrap_or(self.root.as_path())
     }
 }
@@ -112,9 +117,11 @@ impl RuntimePaths {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/setup", get(setup))
         .route("/board", get(board))
         .route("/tasks", get(tasks_index).post(create_task))
         .route("/runs", get(runs_index))
+        .route("/sample-app", get(sample_app))
         .route("/health", get(health))
         .route("/tasks/{task_id}", get(task_detail))
         .route("/tasks/{task_id}/artifacts/{role}", get(task_artifact))
@@ -128,11 +135,18 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 async fn index(State(state): State<AppState>) -> Html<String> {
+    if !state.bootstrap().setup_ready() {
+        return Html(ui::render_setup(ui::SetupView {
+            bootstrap: state.bootstrap(),
+        }));
+    }
+
     let runtime = state.runtime();
     let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
     let state_store = db::state_store_status(runtime);
     let recent_runs = db::list_recent_stage_runs(runtime, 12).unwrap_or_default();
     let body = ui::render_dashboard(ui::DashboardView {
+        bootstrap: state.bootstrap(),
         runtime_root: &runtime.relative_to_repo(&runtime.root),
         state_store: &state_store,
         tasks: &task_snapshot,
@@ -145,7 +159,18 @@ async fn index(State(state): State<AppState>) -> Html<String> {
     Html(body)
 }
 
+async fn setup(State(state): State<AppState>) -> Html<String> {
+    Html(ui::render_setup(ui::SetupView {
+        bootstrap: state.bootstrap(),
+    }))
+}
+
 async fn board(State(state): State<AppState>) -> Html<String> {
+    if !state.bootstrap().setup_ready() {
+        return Html(ui::render_setup(ui::SetupView {
+            bootstrap: state.bootstrap(),
+        }));
+    }
     let runtime = state.runtime();
     let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
     Html(ui::render_board(ui::BoardView {
@@ -154,6 +179,11 @@ async fn board(State(state): State<AppState>) -> Html<String> {
 }
 
 async fn tasks_index(State(state): State<AppState>) -> Html<String> {
+    if !state.bootstrap().setup_ready() {
+        return Html(ui::render_setup(ui::SetupView {
+            bootstrap: state.bootstrap(),
+        }));
+    }
     let runtime = state.runtime();
     let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
     Html(ui::render_tasks_index(ui::TaskListView {
@@ -162,6 +192,11 @@ async fn tasks_index(State(state): State<AppState>) -> Html<String> {
 }
 
 async fn runs_index(State(state): State<AppState>) -> Html<String> {
+    if !state.bootstrap().setup_ready() {
+        return Html(ui::render_setup(ui::SetupView {
+            bootstrap: state.bootstrap(),
+        }));
+    }
     let runtime = state.runtime();
     let task_snapshot = db::list_tasks(runtime).unwrap_or_default();
     let recent_runs = db::list_recent_stage_runs(runtime, 64).unwrap_or_default();
@@ -179,6 +214,12 @@ async fn task_detail(
     State(state): State<AppState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Html(ui::render_setup(ui::SetupView {
+            bootstrap: state.bootstrap(),
+        }))
+        .into_response();
+    }
     let runtime = state.runtime();
     let Some(task) = db::get_task(runtime, &task_id).unwrap_or_default() else {
         return (
@@ -209,6 +250,24 @@ async fn task_detail(
         pr_summary: pr_summary.as_deref(),
     }))
     .into_response()
+}
+
+async fn sample_app(State(state): State<AppState>) -> Response {
+    let fixture_path = state
+        .runtime()
+        .repo_root()
+        .join("fixtures/sample-app/index.html");
+    match std::fs::read_to_string(&fixture_path) {
+        Ok(contents) => Html(contents).into_response(),
+        Err(error) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Html(format!(
+                "<h1>Sample app fixture not found</h1><p>{}: {error}</p>",
+                fixture_path.display()
+            )),
+        )
+            .into_response(),
+    }
 }
 
 async fn task_artifact(
@@ -256,6 +315,15 @@ struct TaskCreateForm {
 }
 
 async fn create_task(State(state): State<AppState>, Form(form): Form<TaskCreateForm>) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return (
+            axum::http::StatusCode::PRECONDITION_FAILED,
+            Html(ui::render_setup(ui::SetupView {
+                bootstrap: state.bootstrap(),
+            })),
+        )
+            .into_response();
+    }
     match orchestrator::create_draft_task(state.runtime(), &form.goal) {
         Ok(task) => Redirect::to(&format!("/tasks/{}", task.id)).into_response(),
         Err(error) => (
@@ -270,6 +338,9 @@ async fn run_planning(
     State(state): State<AppState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Redirect::to("/setup").into_response();
+    }
     match orchestrator::run_planning(state.runtime(), &task_id) {
         Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
@@ -284,6 +355,9 @@ async fn run_development(
     State(state): State<AppState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Redirect::to("/setup").into_response();
+    }
     match orchestrator::run_development(state.runtime(), &task_id) {
         Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
@@ -298,6 +372,9 @@ async fn run_review(
     State(state): State<AppState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Redirect::to("/setup").into_response();
+    }
     match orchestrator::run_review(state.runtime(), &task_id) {
         Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
@@ -312,6 +389,9 @@ async fn run_fix_loop(
     State(state): State<AppState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Redirect::to("/setup").into_response();
+    }
     match orchestrator::run_fix_loop(state.runtime(), &task_id) {
         Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
@@ -323,6 +403,9 @@ async fn run_fix_loop(
 }
 
 async fn run_qa(State(state): State<AppState>, AxumPath(task_id): AxumPath<String>) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Redirect::to("/setup").into_response();
+    }
     match qa::run_qa(state.runtime(), &task_id) {
         Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (
@@ -337,6 +420,9 @@ async fn run_pr_preparation(
     State(state): State<AppState>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Response {
+    if !state.bootstrap().setup_ready() {
+        return Redirect::to("/setup").into_response();
+    }
     match orchestrator::run_pr_preparation(state.runtime(), &task_id) {
         Ok(_) => Redirect::to(&format!("/tasks/{task_id}")).into_response(),
         Err(error) => (

@@ -28,6 +28,17 @@ pub fn run_qa(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
         task_id: task.id.clone(),
         stage: "qa".into(),
         summary: "Execute qa-steps.md scenarios and capture evidence".into(),
+        repo_root: runtime.repo_root().display().to_string(),
+        repo_name: runtime
+            .repo_root()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown-repo")
+            .to_string(),
+        git_branch: db::load_repo_metadata(runtime)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.git_branch),
     };
 
     runner::execute_job(runtime, job, |run, log_path| {
@@ -75,7 +86,7 @@ pub fn run_qa(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
             .map_err(|error| format!("failed to read {}: {error}", review_md.display()))?;
 
         let scenarios = parse_qa_steps(&qa_steps_input)?;
-        let evidence = capture_browser_evidence(runtime, &task.id, &run.id)?;
+        let evidence = capture_browser_evidence(runtime, &task, &run.id)?;
         let scenario_results = execute_scenarios(
             &task,
             &task_input,
@@ -331,6 +342,19 @@ fn execute_scenario(
         };
     }
 
+    if normalized_heading.contains("sample app route loads successfully") {
+        let passed = evidence.capture_succeeded;
+        return QaScenarioResult {
+            heading,
+            passed,
+            notes: if passed {
+                vec!["sample app rendered and browser evidence capture completed".into()]
+            } else {
+                vec!["sample app did not finish loading well enough for evidence capture".into()]
+            },
+        };
+    }
+
     let mut notes = Vec::new();
     if !scenario.steps.is_empty() {
         notes.push(format!(
@@ -357,7 +381,7 @@ fn execute_scenario(
 
 fn capture_browser_evidence(
     runtime: &RuntimePaths,
-    task_id: &str,
+    task: &TaskRecord,
     run_id: &str,
 ) -> Result<QaEvidence, String> {
     let log_path = runtime.qa_logs_dir.join(format!("{run_id}.log"));
@@ -366,18 +390,19 @@ fn capture_browser_evidence(
         .join(format!("{run_id}-board.png"));
     let har_path = runtime.qa_traces_dir.join(format!("{run_id}.har"));
 
+    let target = qa_browser_target(task);
     let output = Command::new("npx")
         .arg("playwright")
         .arg("screenshot")
         .arg("--browser")
         .arg("chromium")
         .arg("--wait-for-selector")
-        .arg(format!("#task-{task_id}"))
+        .arg(target.selector)
         .arg("--wait-for-timeout")
         .arg("750")
         .arg("--save-har")
         .arg(&har_path)
-        .arg("http://127.0.0.1:3000")
+        .arg(target.url)
         .arg(&screenshot_path)
         .output()
         .map_err(|error| format!("failed to invoke Playwright screenshot command: {error}"))?;
@@ -402,7 +427,10 @@ fn capture_browser_evidence(
     let capture_succeeded = output.status.success() && screenshot_exists && har_exists;
 
     if capture_succeeded {
-        capture_notes.push("Playwright captured the Patron home page successfully".into());
+        capture_notes.push(format!(
+            "Playwright captured QA target `{}` successfully",
+            target.name
+        ));
     } else {
         if !output.status.success() {
             capture_notes.push(format!(
@@ -453,6 +481,37 @@ fn capture_browser_evidence(
         capture_succeeded,
         capture_notes,
     })
+}
+
+struct QaBrowserTarget {
+    name: &'static str,
+    url: &'static str,
+    selector: &'static str,
+}
+
+fn qa_browser_target(task: &TaskRecord) -> QaBrowserTarget {
+    if is_sample_app_task(task) {
+        QaBrowserTarget {
+            name: "sample-app",
+            url: "http://127.0.0.1:3000/sample-app",
+            selector: "#sample-app.ready",
+        }
+    } else {
+        QaBrowserTarget {
+            name: "patron-board",
+            url: "http://127.0.0.1:3000/board",
+            selector: "#task-board",
+        }
+    }
+}
+
+fn is_sample_app_task(task: &TaskRecord) -> bool {
+    let haystack = format!(
+        "{}\n{}",
+        task.title.to_ascii_lowercase(),
+        task.goal.to_ascii_lowercase()
+    );
+    haystack.contains("sample app") || haystack.contains("sample-app")
 }
 
 fn build_qa_report(

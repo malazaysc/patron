@@ -103,6 +103,17 @@ pub fn run_planning(runtime: &RuntimePaths, task_id: &str) -> Result<(), String>
         task_id: task.id.clone(),
         stage: "planning".into(),
         summary: "Generate task.md, plan.md, and qa-steps.md".into(),
+        repo_root: runtime.repo_root().display().to_string(),
+        repo_name: runtime
+            .repo_root()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown-repo")
+            .to_string(),
+        git_branch: db::load_repo_metadata(runtime)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.git_branch),
     };
 
     runner::execute_job(runtime, job, |run, log_path| {
@@ -250,6 +261,17 @@ pub fn run_development(runtime: &RuntimePaths, task_id: &str) -> Result<(), Stri
         task_id: task.id.clone(),
         stage: "development".into(),
         summary: "Consume planning artifacts and generate a reviewable development summary".into(),
+        repo_root: runtime.repo_root().display().to_string(),
+        repo_name: runtime
+            .repo_root()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown-repo")
+            .to_string(),
+        git_branch: db::load_repo_metadata(runtime)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.git_branch),
     };
 
     runner::execute_job(runtime, job, |run, log_path| {
@@ -368,6 +390,17 @@ pub fn run_review(runtime: &RuntimePaths, task_id: &str) -> Result<(), String> {
         task_id: task.id.clone(),
         stage: "review".into(),
         summary: "Assess development output and produce review.md".into(),
+        repo_root: runtime.repo_root().display().to_string(),
+        repo_name: runtime
+            .repo_root()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown-repo")
+            .to_string(),
+        git_branch: db::load_repo_metadata(runtime)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.git_branch),
     };
 
     runner::execute_job(runtime, job, |run, log_path| {
@@ -584,6 +617,17 @@ pub fn run_pr_preparation(runtime: &RuntimePaths, task_id: &str) -> Result<(), S
         task_id: task.id.clone(),
         stage: "pr_preparation".into(),
         summary: "Generate pr-summary.md and hand off to human review".into(),
+        repo_root: runtime.repo_root().display().to_string(),
+        repo_name: runtime
+            .repo_root()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown-repo")
+            .to_string(),
+        git_branch: db::load_repo_metadata(runtime)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.git_branch),
     };
 
     runner::execute_job(runtime, job, |run, log_path| {
@@ -830,26 +874,48 @@ fn excerpt(value: &str) -> String {
 }
 
 fn build_planning_package(task: &TaskRecord) -> PlanningPackage {
+    let sample_app_task = is_sample_app_task(task);
     let task_md = format!(
         "# Task\n\n## ID\n`{}`\n\n## Title\n{}\n\n## Problem\n{}\n\n## Scope\n- Build the smallest implementation slice that satisfies the requested goal.\n- Keep the implementation local-first and repository-scoped.\n- Preserve deterministic task progression for later stages.\n\n## Constraints\n- macOS-only local runtime\n- single repository scope\n- runtime state must stay under `/.patron/`\n- avoid hidden automation or untracked side effects\n\n## Acceptance Criteria\n- A planning package exists for this task.\n- The task has `task.md`, `plan.md`, and `qa-steps.md` in its runtime workspace.\n- The task is ready for the development stage.\n\n## Dependencies\n- Rust application scaffold\n- SQLite runtime state\n- `.patron/` task workspace\n\n## Human Approvals\n- Task intake already completed\n- PR review still required later in the pipeline\n",
         task.id, task.title, task.goal
     );
 
     let plan_md = format!(
-        "# Plan\n\n## Objective\nPrepare this task for implementation with a bounded development slice.\n\n## Steps\n1. Confirm the existing scaffold and current task context.\n2. Implement the smallest viable change set for the requested goal.\n3. Validate the behavior with code-level checks before QA.\n4. Hand the task to review with clear artifacts and state updates.\n\n## Development Notes\n- Use the task workspace under `/.patron/tasks/{}` as the source of runtime planning context.\n- Keep artifacts human-readable and stage-specific.\n- Avoid relying on chat history for downstream execution.\n",
-        task.id
+        "# Plan\n\n## Objective\nPrepare this task for implementation with a bounded development slice.\n\n## Steps\n1. Confirm the existing scaffold and current task context.\n2. Implement the smallest viable change set for the requested goal.\n3. Validate the behavior with code-level checks before QA.\n4. Hand the task to review with clear artifacts and state updates.\n\n## Development Notes\n- Use the task workspace under `/.patron/tasks/{}` as the source of runtime planning context.\n- Keep artifacts human-readable and stage-specific.\n- Avoid relying on chat history for downstream execution.\n{}\n",
+        task.id,
+        if sample_app_task {
+            "\n## Sample App Target\n- This task is intended for the built-in sample app at `/sample-app`.\n- Development and QA should verify target-app behavior instead of Patron UI internals."
+        } else {
+            ""
+        }
     );
 
-    let qa_steps_md = format!(
-        "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Review package exists for QA handoff\n- Confirm that `development-summary.md` and `review.md` exist in the task workspace.\n- Confirm that `review.md` recorded a passing review outcome before QA started.\n- Expected result: the task has review artifacts and is ready for QA execution.\n\n## Scenario 4: Browser evidence is captured during QA\n- Open the Patron UI in a browser-driven QA pass.\n- Capture a screenshot and HAR file while the task is visible on the board.\n- Expected result: QA leaves behind inspectable browser evidence for the active task.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
-        task.id
-    );
+    let qa_steps_md = if sample_app_task {
+        format!(
+            "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Sample app route loads successfully\n- Open the built-in sample app at `http://127.0.0.1:3000/sample-app`.\n- Confirm the page renders the triage board and interactive controls.\n- Expected result: the sample app is reachable and client-side rendering completes.\n\n## Scenario 4: Browser evidence is captured against the sample app\n- Run browser-driven QA against the sample app route instead of the Patron board.\n- Capture a screenshot and HAR file after the sample app finishes loading.\n- Expected result: QA leaves behind inspectable browser evidence for the sample app flow.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
+            task.id
+        )
+    } else {
+        format!(
+            "# QA Steps\n\n## Scenario 1: Task artifacts are available\n- Open the task workspace for `{}`.\n- Confirm that `task.md`, `plan.md`, and `qa-steps.md` exist.\n- Expected result: all three planning artifacts are present and readable.\n\n## Scenario 2: Planning output reflects the requested goal\n- Read `task.md` and `plan.md`.\n- Confirm the original goal is captured and the plan describes concrete next steps.\n- Expected result: the planning package is aligned with the original goal and is understandable by a human.\n\n## Scenario 3: Review package exists for QA handoff\n- Confirm that `development-summary.md` and `review.md` exist in the task workspace.\n- Confirm that `review.md` recorded a passing review outcome before QA started.\n- Expected result: the task has review artifacts and is ready for QA execution.\n\n## Scenario 4: Browser evidence is captured during QA\n- Open the Patron UI in a browser-driven QA pass.\n- Capture a screenshot and HAR file while the task is visible on the board.\n- Expected result: QA leaves behind inspectable browser evidence for the active task.\n\n## Evidence Requirements\n- Capture the presence of the planning artifacts.\n- Preserve the QA browser screenshot, HAR file, and QA log.\n- Record the final QA outcome and any missing evidence in `qa-report.md`.\n",
+            task.id
+        )
+    };
 
     PlanningPackage {
         task_md,
         plan_md,
         qa_steps_md,
     }
+}
+
+fn is_sample_app_task(task: &TaskRecord) -> bool {
+    let haystack = format!(
+        "{}\n{}",
+        task.title.to_ascii_lowercase(),
+        task.goal.to_ascii_lowercase()
+    );
+    haystack.contains("sample app") || haystack.contains("sample-app")
 }
 
 fn validate_required_artifacts(paths: &[&Path]) -> Result<(), String> {

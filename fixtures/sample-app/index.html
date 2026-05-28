@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Patron Sample App</title>
+  <style>
+    :root {
+      --bg: #f4efe8;
+      --panel: #fffaf3;
+      --ink: #221c16;
+      --muted: #6a6259;
+      --line: #dccfbe;
+      --accent: #b5522f;
+      --green: #3f7b56;
+      --green-soft: #dcebdc;
+      --gold-soft: #f4e3b0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(181,82,47,0.10), transparent 24%),
+        linear-gradient(180deg, #fff8ef 0%, var(--bg) 55%);
+    }
+    .wrap {
+      max-width: 1024px;
+      margin: 0 auto;
+      padding: 40px 20px 80px;
+      display: grid;
+      gap: 24px;
+    }
+    .hero, .board, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 14px 28px rgba(82, 58, 22, 0.08);
+    }
+    .eyebrow {
+      margin: 0 0 8px;
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    h1, h2, h3, p { margin: 0; }
+    .lede { color: var(--muted); margin-top: 12px; max-width: 640px; line-height: 1.5; }
+    .metrics, .board-grid {
+      display: grid;
+      gap: 16px;
+    }
+    .metrics {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+    .metric, .ticket {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 18px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 2rem;
+      margin-bottom: 6px;
+    }
+    .board-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .ticket {
+      display: grid;
+      gap: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      background: var(--green-soft);
+      color: var(--green);
+    }
+    .pill.needs-review { background: #f7d8cf; color: #8e3e24; }
+    .pill.blocked { background: var(--gold-soft); color: #76570a; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      background: #211b16;
+      color: white;
+    }
+    button.secondary {
+      background: white;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+    .status {
+      color: var(--muted);
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <main id="sample-app" class="wrap" data-state="booting">
+    <section class="hero">
+      <p class="eyebrow">Sample App</p>
+      <h1>Support Triage Board</h1>
+      <p class="lede">This tiny target app exists to dogfood Patron against a real UI that is not Patron itself.</p>
+    </section>
+
+    <section class="metrics">
+      <div class="metric">
+        <strong id="open-count">2</strong>
+        <span>Open tickets</span>
+      </div>
+      <div class="metric">
+        <strong id="review-count">1</strong>
+        <span>Needs review</span>
+      </div>
+      <div class="metric">
+        <strong id="blocked-count">1</strong>
+        <span>Blocked</span>
+      </div>
+    </section>
+
+    <section class="board">
+      <p class="eyebrow">Queue</p>
+      <div class="board-grid">
+        <article class="ticket">
+          <span class="pill">ready</span>
+          <h2>Reset onboarding CTA copy</h2>
+          <p class="status">The team wants clearer action language in the first-run flow.</p>
+        </article>
+        <article class="ticket">
+          <span class="pill needs-review">needs review</span>
+          <h2>Verify quickstart examples</h2>
+          <p class="status">The example commands should match the current Patron setup path.</p>
+        </article>
+        <article class="ticket">
+          <span class="pill blocked">blocked</span>
+          <h2>Missing QA screenshot evidence</h2>
+          <p class="status">This item is intentionally here so the sample UI mirrors Patron concepts.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <p class="eyebrow">Interaction</p>
+      <h3>Deterministic Controls</h3>
+      <p class="lede" style="margin-bottom: 16px;">These controls make the sample app feel alive enough for browser QA without adding backend complexity.</p>
+      <div class="actions">
+        <button id="add-ticket" type="button">Add Ticket</button>
+        <button id="resolve-review" type="button" class="secondary">Resolve Review</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const root = document.getElementById("sample-app");
+      const openCount = document.getElementById("open-count");
+      const reviewCount = document.getElementById("review-count");
+      const addTicket = document.getElementById("add-ticket");
+      const resolveReview = document.getElementById("resolve-review");
+
+      addTicket.addEventListener("click", () => {
+        openCount.textContent = String(Number(openCount.textContent) + 1);
+      });
+
+      resolveReview.addEventListener("click", () => {
+        reviewCount.textContent = "0";
+      });
+
+      window.requestAnimationFrame(() => {
+        root.dataset.state = "ready";
+        root.classList.add("ready");
+      });
+    })();
+  </script>
+</body>
+</html>

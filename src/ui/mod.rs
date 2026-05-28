@@ -1,12 +1,18 @@
 use std::collections::HashMap;
 
+use crate::bootstrap::BootstrapStatus;
 use crate::db::{
     HumanActionRecord, StageRunRecord, StateStoreStatus, StateTransitionRecord, TaskRecord,
     WorkingArtifactRecord,
 };
 use crate::domain::TASK_PIPELINE_STAGES;
 
+pub struct SetupView<'a> {
+    pub bootstrap: &'a BootstrapStatus,
+}
+
 pub struct DashboardView<'a> {
+    pub bootstrap: &'a BootstrapStatus,
     pub runtime_root: &'a std::path::Path,
     pub state_store: &'a StateStoreStatus<'a>,
     pub tasks: &'a [TaskRecord],
@@ -39,6 +45,117 @@ pub struct TaskDetailView<'a> {
     pub qa_log: Option<&'a str>,
     pub review_report: Option<&'a str>,
     pub pr_summary: Option<&'a str>,
+}
+
+pub fn render_setup(view: SetupView<'_>) -> String {
+    let blockers = if view.bootstrap.blockers.is_empty() {
+        "<li>No blocking issues detected.</li>".to_string()
+    } else {
+        view.bootstrap
+            .blockers
+            .iter()
+            .map(|entry| format!("<li>{}</li>", html_escape(entry)))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let warnings = if view.bootstrap.warnings.is_empty() {
+        "<li>No warnings detected.</li>".to_string()
+    } else {
+        view.bootstrap
+            .warnings
+            .iter()
+            .map(|entry| format!("<li>{}</li>", html_escape(entry)))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let requirements = view
+        .bootstrap
+        .requirements
+        .iter()
+        .map(|requirement| {
+            format!(
+                "<li><strong>{}</strong> <span class=\"status-badge status-{}\">{}</span><br><small>{}</small></li>",
+                html_escape(requirement.name),
+                if requirement.ok { "ready-for-development" } else { "blocked" },
+                if requirement.ok { "ok" } else { "missing" },
+                html_escape(&requirement.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    let body = format!(
+        "<section class=\"hero\">\
+           <div>\
+             <p class=\"eyebrow\">Setup</p>\
+             <h1>Initialize Patron for this repository.</h1>\
+             <p class=\"lede\">Patron no longer creates runtime state implicitly on server start. Run the explicit init step, then reload the app.</p>\
+             <div class=\"hero-actions\">\
+               <code>cargo run -- init</code>\
+               <a class=\"button secondary\" href=\"https://github.com/malazaysc/patron/blob/main/README.md\">Open Getting Started Guide</a>\
+             </div>\
+           </div>\
+           <div class=\"hero-panel\">\
+             <div class=\"metric\"><span class=\"metric-value\">{}</span><span class=\"metric-label\">Blockers</span></div>\
+             <div class=\"metric\"><span class=\"metric-value\">{}</span><span class=\"metric-label\">Warnings</span></div>\
+             <div class=\"metric\"><span class=\"metric-value\">{}</span><span class=\"metric-label\">Repo Ready</span></div>\
+             <div class=\"metric\"><span class=\"metric-value\">{}</span><span class=\"metric-label\">Runtime Ready</span></div>\
+           </div>\
+         </section>\
+         <section class=\"dashboard-grid\">\
+           <div class=\"dashboard-main\">\
+             <section class=\"panel\">\
+               <div class=\"panel-header\"><div><p class=\"eyebrow\">Repository</p><h2>{}</h2></div></div>\
+               <ul class=\"plain-list\">\
+                 <li><strong>Repo root</strong><br><small><code>{}</code></small></li>\
+                 <li><strong>Branch</strong><br><small><code>{}</code></small></li>\
+                 <li><strong>Runtime root</strong><br><small><code>{}</code></small></li>\
+               </ul>\
+             </section>\
+             <section class=\"panel\">\
+               <div class=\"panel-header\"><div><p class=\"eyebrow\">Checks</p><h2>Requirements</h2></div></div>\
+               <ul class=\"plain-list\">{}</ul>\
+             </section>\
+           </div>\
+           <aside class=\"dashboard-side\">\
+             <section class=\"panel attention-panel\">\
+               <div class=\"panel-header\"><div><p class=\"eyebrow\">Action</p><h2>Blockers</h2></div></div>\
+               <ul class=\"plain-list\">{}</ul>\
+             </section>\
+             <section class=\"panel\">\
+               <div class=\"panel-header\"><div><p class=\"eyebrow\">Heads Up</p><h2>Warnings</h2></div></div>\
+               <ul class=\"plain-list\">{}</ul>\
+             </section>\
+           </aside>\
+         </section>",
+        view.bootstrap.blockers.len(),
+        view.bootstrap.warnings.len(),
+        if view.bootstrap.repo.is_git_repo {
+            "yes"
+        } else {
+            "no"
+        },
+        if view.bootstrap.initialized {
+            "yes"
+        } else {
+            "no"
+        },
+        html_escape(&view.bootstrap.repo.repo_name),
+        html_escape(&view.bootstrap.repo.repo_root.display().to_string()),
+        html_escape(
+            view.bootstrap
+                .repo
+                .git_branch
+                .as_deref()
+                .unwrap_or("unknown")
+        ),
+        html_escape(&view.bootstrap.runtime_root.display().to_string()),
+        requirements,
+        blockers,
+        warnings
+    );
+
+    app_shell("setup", "Setup", &body, "")
 }
 
 pub fn render_dashboard(view: DashboardView<'_>) -> String {
@@ -131,6 +248,7 @@ pub fn render_dashboard(view: DashboardView<'_>) -> String {
 
     let recent_activity = render_recent_runs_panel(view.recent_runs, view.tasks, 8);
     let system = system_status_panel(
+        view.bootstrap,
         view.runtime_root.display().to_string(),
         view.state_store,
         view.orchestrator_status,
@@ -172,7 +290,7 @@ pub fn render_board(view: BoardView<'_>) -> String {
             <div class=\"toolbar-chip\">Ready For QA: {}</div>\
             <div class=\"toolbar-chip\">Ready For PR: {}</div>\
          </section>\
-         <section class=\"board-page\">{}</section>",
+         <section id=\"task-board\" class=\"board-page\">{}</section>",
         count_state(view.tasks, "blocked"),
         count_state(view.tasks, "awaiting_human"),
         count_state(view.tasks, "ready_for_qa"),
@@ -501,6 +619,7 @@ fn app_shell(active: &str, title: &str, body: &str, page_script: &str) -> String
                    <h1>{}</h1>\
                  </div>\
                  <div class=\"topbar-actions\">\
+                   <a class=\"button ghost\" href=\"/sample-app\">Sample App</a>\
                    <a class=\"button ghost\" href=\"/board\">Board</a>\
                    <a class=\"button ghost\" href=\"/runs\">Runs</a>\
                  </div>\
@@ -965,6 +1084,7 @@ fn base_styles() -> &'static str {
 
 fn nav_links(active: &str) -> String {
     let items = [
+        ("setup", "/setup", "Setup"),
         ("dashboard", "/", "Dashboard"),
         ("board", "/board", "Board"),
         ("tasks", "/tasks", "Tasks"),
@@ -1198,6 +1318,7 @@ fn render_recent_runs_panel(runs: &[StageRunRecord], tasks: &[TaskRecord], limit
 }
 
 fn system_status_panel(
+    bootstrap: &BootstrapStatus,
     runtime_root: String,
     state_store: &StateStoreStatus<'_>,
     orchestrator_status: &str,
@@ -1209,6 +1330,7 @@ fn system_status_panel(
            <div class=\"panel-header\"><div><p class=\"eyebrow\">System</p><h2>Runtime</h2></div></div>\
            <ul class=\"plain-list\">\
               <li><strong>Root</strong><br><small><code>{}</code></small></li>\
+              <li><strong>Repository</strong><br><small>{} • branch <code>{}</code></small></li>\
               <li><strong>State Store</strong><br><small>{} at <code>{}</code> • schema v{} • {} migration bytes</small></li>\
               <li><strong>Orchestrator</strong><br><small>{}</small></li>\
               <li><strong>Runner</strong><br><small>{}</small></li>\
@@ -1216,6 +1338,8 @@ fn system_status_panel(
            </ul>\
          </section>",
         html_escape(&runtime_root),
+        html_escape(&bootstrap.repo.repo_name),
+        html_escape(bootstrap.repo.git_branch.as_deref().unwrap_or("unknown")),
         html_escape(state_store.engine),
         html_escape(&state_store.location),
         state_store.schema_version,

@@ -6,14 +6,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::app::RuntimePaths;
 use crate::domain::task_lifecycle::{TaskState, TransitionMetadata};
+use crate::{app::RuntimePaths, bootstrap::RepoContext};
 
 pub struct StateStoreStatus<'a> {
     pub engine: &'a str,
     pub initial_schema_bytes: usize,
     pub location: String,
     pub schema_version: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoMetadataRecord {
+    pub repo_root: String,
+    pub repo_name: String,
+    pub git_branch: Option<String>,
+    pub is_git_repo: bool,
+    pub captured_at: String,
 }
 
 pub fn state_store_status(runtime: &RuntimePaths) -> StateStoreStatus<'_> {
@@ -118,19 +127,111 @@ pub struct WorkingArtifactUpsert<'a> {
 
 pub fn initialize(runtime: &RuntimePaths) -> Result<(), String> {
     let connection = open_connection(&runtime.state_db)?;
-
-    connection
-        .execute_batch(initial_schema_sql())
-        .map_err(|error| format!("failed to apply initial schema: {error}"))?;
-
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-            params![schema::CURRENT_SCHEMA_VERSION, "2026-05-23T00:00:00Z"],
-        )
-        .map_err(|error| format!("failed to seed schema_migrations: {error}"))?;
+    for (version, sql) in schema::MIGRATIONS {
+        connection
+            .execute_batch(sql)
+            .map_err(|error| format!("failed to apply schema migration {version}: {error}"))?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![version, timestamp_now()],
+            )
+            .map_err(|error| format!("failed to record schema migration {version}: {error}"))?;
+    }
 
     Ok(())
+}
+
+pub fn persist_repo_metadata(runtime: &RuntimePaths, repo: &RepoContext) -> Result<(), String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let values = [
+        ("repo_root", repo.repo_root.display().to_string()),
+        ("repo_name", repo.repo_name.clone()),
+        ("git_branch", repo.git_branch.clone().unwrap_or_default()),
+        (
+            "is_git_repo",
+            if repo.is_git_repo {
+                "1".into()
+            } else {
+                "0".into()
+            },
+        ),
+    ];
+
+    for (key, value) in values {
+        connection
+            .execute(
+                "INSERT INTO runtime_metadata(key, value, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at",
+                params![key, value, timestamp_now()],
+            )
+            .map_err(|error| format!("failed to persist runtime metadata `{key}`: {error}"))?;
+    }
+
+    Ok(())
+}
+
+pub fn load_repo_metadata(runtime: &RuntimePaths) -> Result<Option<RepoMetadataRecord>, String> {
+    let connection = open_connection(&runtime.state_db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT key, value, updated_at
+             FROM runtime_metadata
+             WHERE key IN ('repo_root', 'repo_name', 'git_branch', 'is_git_repo')
+             ORDER BY key ASC",
+        )
+        .map_err(|error| format!("failed to prepare runtime metadata query: {error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query runtime metadata: {error}"))?;
+
+    let entries = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode runtime metadata: {error}"))?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    let mut repo_root = None;
+    let mut repo_name = None;
+    let mut git_branch = None;
+    let mut is_git_repo = false;
+    let mut captured_at = String::new();
+
+    for (key, value, updated_at) in entries {
+        captured_at = updated_at;
+        match key.as_str() {
+            "repo_root" => repo_root = Some(value),
+            "repo_name" => repo_name = Some(value),
+            "git_branch" if !value.trim().is_empty() => {
+                git_branch = Some(value);
+            }
+            "git_branch" => {}
+            "is_git_repo" => is_git_repo = value == "1",
+            _ => {}
+        }
+    }
+
+    match (repo_root, repo_name) {
+        (Some(repo_root), Some(repo_name)) => Ok(Some(RepoMetadataRecord {
+            repo_root,
+            repo_name,
+            git_branch,
+            is_git_repo,
+            captured_at,
+        })),
+        _ => Ok(None),
+    }
 }
 
 pub fn next_task_id(runtime: &RuntimePaths) -> Result<String, String> {
