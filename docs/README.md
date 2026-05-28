@@ -12,6 +12,7 @@ The goal is a local-first, single-repository software delivery harness for Codex
 - [PRD Template](./prd/README.md)
 - [V1 PRD](./prd/001-v1-local-autonomous-delivery-harness.md)
 - [GitHub Backlog Draft](./planning/github-backlog.md)
+- [New Project Readiness Backlog](./planning/new-project-readiness-backlog.md)
 - [ADR 0001](./adr/0001-local-first-single-repo-scope.md)
 - [ADR 0002](./adr/0002-deterministic-task-pipeline.md)
 - [ADR 0003](./adr/0003-stage-artifact-workflow.md)
